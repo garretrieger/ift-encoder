@@ -6,6 +6,9 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "common/int_set.h"
+#include "common/sparse_bit_set.h"
+#include "common/try.h"
+#include "ift/encoder/glyph_partition.h"
 #include "ift/encoder/subset_definition.h"
 #include "ift/encoder/types.h"
 #include "ift/proto/patch_encoding.h"
@@ -18,7 +21,10 @@ using absl::Status;
 using absl::StatusOr;
 using absl::StrCat;
 using common::IntSet;
+using common::GlyphSet;
 using common::SegmentSet;
+using common::SparseBitSet;
+using common::CodepointSet;
 using ift::freq::ProbabilityCalculator;
 using ift::proto::PatchEncoding;
 using ift::proto::PatchMap;
@@ -179,6 +185,140 @@ patch_id_t MapTo(PatchMap::Entry& entry, patch_id_t new_patch_id,
   return entry.patch_indices.back();
 }
 
+static unsigned CodepointEncodingSize(const SubsetDefinition& segment) {
+  return SparseBitSet::Encode(segment.codepoints).size();
+}
+
+static segment_index_t MaxSegmentIndex(const btree_set<ActivationCondition>& conditions) {
+  segment_index_t max = 0;
+  for (const auto& c : conditions) {
+    for (segment_index_t s : c.TriggeringSegments()) {
+      if (s > max) {
+        max = s;
+      }
+    }
+  }
+  return max;
+}
+
+static bool MustUseSharedSegments(
+  const flat_hash_map<segment_index_t, SubsetDefinition>& segments,
+  const ActivationCondition& condition
+) {
+  // Any conjunctive conditions, or conditions with at least one non codepoint
+  // only segment must always used shared segments.
+  if (condition.conditions().size() > 1) {
+    return true;
+  }
+
+  SegmentSet condition_segments = condition.TriggeringSegments();
+  for (segment_index_t s : condition_segments) {
+    const SubsetDefinition& def = segments.at(s);
+    if (!def.design_space.empty() || !def.feature_tags.empty()) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static CodepointSet CodepointsFor(
+  const SegmentSet& condition_segments,
+  const flat_hash_map<segment_index_t, SubsetDefinition>& segments
+) {
+  CodepointSet all;
+  for (segment_index_t s : condition_segments) {
+    const SubsetDefinition& def = segments.at(s);
+    all.union_set(def.codepoints);
+  }
+  return all;
+}
+
+static Status CompareDuplicationCosts(
+  const btree_set<ActivationCondition>& conditions,
+  const flat_hash_map<segment_index_t, SubsetDefinition>& segments,
+  const GlyphPartition& segment_partition,
+  const SegmentSet& shared_reps,
+  SegmentSet& segments_to_duplicate
+) {
+  flat_hash_map<segment_index_t, unsigned> rep_to_duplicated_size;
+  flat_hash_map<segment_index_t, unsigned> rep_to_shared_size;
+
+  for (const auto& c : conditions) {
+    segment_index_t first = *(c.conditions().begin()->begin());
+    segment_index_t rep = TRY(segment_partition.Find(first));
+    if (shared_reps.contains(rep)) {
+      continue;
+    }
+
+    SegmentSet condition_segments = c.TriggeringSegments();
+    CodepointSet all_codepoints = CodepointsFor(condition_segments, segments);
+
+    rep_to_duplicated_size[rep] += SparseBitSet::Encode(all_codepoints).size();
+    // 1 byte child count + 3 byte child entry index per segment
+    rep_to_shared_size[rep] += 1 + condition_segments.size() * 3;
+  }
+
+  for (auto& [rep, shared_size] : rep_to_shared_size) {
+    for (segment_index_t segment : TRY(segment_partition.GlyphsFor(rep))) {
+      const CodepointSet& codepoints = segments.at(segment).codepoints;
+      // add cost of the child entry, 1 byte format + size of the sparse bit set.
+      shared_size += 1 + SparseBitSet::Encode(codepoints).size();
+    }
+  }
+
+  for (const auto& [rep, shared_size] : rep_to_shared_size) {
+    unsigned duplicated_size = rep_to_duplicated_size.at(rep);
+    if (duplicated_size < shared_size) {
+      segments_to_duplicate.union_set(TRY(segment_partition.GlyphsFor(rep)));
+    }
+  }
+
+  return absl::OkStatus();
+}
+
+// Analyze a set of activation conditions and decide which segments should
+// not be shared via the child index mechanism due to it being cheaper to
+// just encode duplicate copies of the segments subset definition.
+static Status FindSegmentsToDuplicate(
+  const btree_set<ActivationCondition>& conditions,
+  const flat_hash_map<segment_index_t, SubsetDefinition>& segments,
+  SegmentSet& segments_to_duplicate
+) {
+  // TODO XXXX what about the fallback segment, that will pull everything
+  //           into one partitition...
+  segments_to_duplicate.clear();
+  if (conditions.empty()) {
+    return absl::OkStatus();
+  }
+
+  // Group into partitions of connected segments.
+  GlyphPartition segment_partition(MaxSegmentIndex(conditions));
+  for (const auto& c : conditions) {
+    GlyphSet set;
+    set.swap(c.TriggeringSegments());
+    TRYV(segment_partition.Union(set));
+  }
+
+  // Then if at least one segment in a partition must be shared then all
+  // of them have to be shared. Track partition representatives that are shared.
+  SegmentSet shared_reps;
+  for (const auto& c : conditions) {
+    segment_index_t first = *(c.conditions().begin()->begin());
+    segment_index_t rep = TRY(segment_partition.Find(first));
+    if (shared_reps.contains(rep)) {
+      // Already marked shared.
+      continue;
+    }
+
+    if (MustUseSharedSegments(segments, c)) {
+      shared_reps.insert(rep);
+    }
+  }
+
+  return CompareDuplicationCosts(conditions, segments, segment_partition, shared_reps, segments_to_duplicate);
+}
+
 StatusOr<std::vector<PatchMap::Entry>>
 ActivationCondition::ActivationConditionsToPatchMapEntries(
     Span<const ActivationCondition> conditions,
@@ -202,6 +342,12 @@ ActivationCondition::ActivationConditionsToPatchMapEntries(
   btree_set<ActivationCondition> remaining_conditions;
   remaining_conditions.insert(conditions.begin(), conditions.end());
 
+  // For small segments, it can be more costly to reuse (share) the subset definition
+  // instead of just encoding it directly when needed, this computes the set
+  // of segments which we must be shared.
+  SegmentSet segments_to_duplicate;
+  TRYV(FindSegmentsToDuplicate(remaining_conditions, segments, segments_to_duplicate));
+
   // Phase 1 generate the base entries, there should be one for each
   // unique glyph segment that is referenced in at least one condition.
   // the conditions will refer back to these base entries via copy indices
@@ -213,39 +359,44 @@ ActivationCondition::ActivationConditionsToPatchMapEntries(
   for (auto condition = remaining_conditions.begin();
        condition != remaining_conditions.end();) {
     bool remove = false;
-    for (const auto& group : condition->conditions()) {
-      for (uint32_t segment_id : group) {
-        if (segment_id_to_entry_index.contains(segment_id)) {
-          continue;
-        }
-
-        auto original = segments.find(segment_id);
-        if (original == segments.end()) {
-          return absl::InvalidArgumentError(
-              StrCat("Codepoint segment ", segment_id, " not found."));
-        }
-        const auto& original_def = original->second;
-
-        std::vector<PatchMap::Entry> sub_entries =
-            // Activated patch ID will be assigned after this step, so just use
-            // empty array as a place holder
-            original_def.ToEntries(condition->encoding_, last_patch_id,
-                                   entries.size(), {});
-        auto& sub_entry = sub_entries.back();
-
-        last_patch_id = sub_entry.patch_indices.back();
-        if (condition->IsUnitary()) {
-          // this condition can use this entry to map itself. Update the entries
-          // mapped patch id.
-          last_patch_id =
-              MapTo(sub_entry, condition->activated(), condition->prefetches());
-          remove = true;
-        }
-
-        entries.insert(entries.end(), sub_entries.begin(), sub_entries.end());
-        next_entry_index = entries.size();
-        segment_id_to_entry_index[segment_id] = next_entry_index - 1;
+    for (uint32_t segment_id : condition->TriggeringSegments()) {
+      if (segment_id_to_entry_index.contains(segment_id)) {
+        continue;
       }
+
+      if (!condition->IsUnitary() && segments_to_duplicate.contains(segment_id)) {
+        // we have decided to duplicate instead of share this segment so skip
+        // encoding it here, unless this is a non-composite condition in which
+        // case this is not a case of sharing and we will need to encode it.
+        continue;
+      }
+
+      auto original = segments.find(segment_id);
+      if (original == segments.end()) {
+        return absl::InvalidArgumentError(
+            StrCat("Codepoint segment ", segment_id, " not found."));
+      }
+      const auto& original_def = original->second;
+
+      std::vector<PatchMap::Entry> sub_entries =
+          // Activated patch ID will be assigned after this step, so just use
+          // empty array as a place holder
+          original_def.ToEntries(condition->encoding_, last_patch_id,
+                                 entries.size(), {});
+      auto& sub_entry = sub_entries.back();
+
+      last_patch_id = sub_entry.patch_indices.back();
+      if (condition->IsUnitary()) {
+        // this condition can use this entry to map itself. Update the entries
+        // mapped patch id.
+        last_patch_id =
+            MapTo(sub_entry, condition->activated(), condition->prefetches());
+        remove = true;
+      }
+
+      entries.insert(entries.end(), sub_entries.begin(), sub_entries.end());
+      next_entry_index = entries.size();
+      segment_id_to_entry_index[segment_id] = next_entry_index - 1;
     }
 
     if (remove) {
@@ -273,16 +424,25 @@ ActivationCondition::ActivationConditionsToPatchMapEntries(
 
       PatchMap::Entry entry;
       entry.encoding = condition->encoding_;
-      entry.coverage.conjunctive = false;  // ... OR ...
 
       for (uint32_t segment_id : group) {
-        auto entry_index = segment_id_to_entry_index.find(segment_id);
-        if (entry_index == segment_id_to_entry_index.end()) {
-          return absl::InternalError(
-              StrCat("entry for segment_id = ", segment_id,
+        if (!segments_to_duplicate.contains(segment_id)) {
+          entry.coverage.conjunctive = false;  // ... OR ...
+          auto entry_index = segment_id_to_entry_index.find(segment_id);
+          if (entry_index == segment_id_to_entry_index.end()) {
+            return absl::InternalError(
+                StrCat("entry for segment_id = ", segment_id,
                      " was not previously created."));
+          }
+          entry.coverage.child_indices.insert(entry_index->second);
+        } else {
+          // We're not reusing a shared entry so just union the def into the
+          // entry's definition. The processing in FindSegmentsToDuplicate() ensures
+          // this is done consistently for all segments in a condition, and that
+          // all segments involved are codepoint only.
+          const SubsetDefinition& def = segments.at(segment_id);
+          entry.coverage.codepoints.union_set(def.codepoints);
         }
-        entry.coverage.child_indices.insert(entry_index->second);
       }
 
       if (condition->conditions().size() == 1) {
@@ -312,6 +472,8 @@ ActivationCondition::ActivationConditionsToPatchMapEntries(
     entry.encoding = condition->encoding_;
     entry.coverage.conjunctive = true;  // ... AND ...
 
+    // We don't need to checked for duplicated segments here since conjunctive conditions
+    // will never use them.
     for (const auto& group : condition->conditions()) {
       if (group.size() == 1) {
         entry.coverage.child_indices.insert(

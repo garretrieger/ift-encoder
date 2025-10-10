@@ -121,6 +121,10 @@ class IntSet {
     return *this;
   }
 
+  void swap(IntSet&& other) {
+    this->set_.swap(other.set_);
+  }
+
   bool operator==(const IntSet& other) const {
     return hb_set_is_equal(this->set_.get(), other.set_.get());
   }
