@@ -23,6 +23,7 @@
 #include "common/try.h"
 #include "common/woff2.h"
 #include "ift/encoder/glyph_segmentation.h"
+#include "ift/encoder/invalidation_set.h"
 #include "ift/encoder/merge_strategy.h"
 #include "ift/encoder/merger.h"
 #include "ift/encoder/segment.h"
@@ -108,7 +109,7 @@ Status ValidateIncrementalGroupings(hb_face_t* face,
   GlyphSet all_glyphs;
   uint32_t glyph_count = hb_face_get_glyph_count(face);
   all_glyphs.insert_range(0, glyph_count - 1);
-  TRYV(non_incremental_context.GroupGlyphs(all_glyphs));
+  TRYV(non_incremental_context.GroupGlyphs(all_glyphs, {}));
 
   if (non_incremental_context.glyph_groupings.ConditionsAndGlyphs() !=
       context.glyph_groupings.ConditionsAndGlyphs()) {
@@ -479,9 +480,11 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
 
   while (true) {
     auto& merger = mergers[merger_index];
-    auto merged = TRY(merger.TryNextMerge());
+    auto maybe_modified =
+        TRY(merger.TryNextMerge());  // XXXXX switch this to return a struct
+                                     // that also has modified segments list.
 
-    if (!merged.has_value()) {
+    if (!maybe_modified.has_value()) {
       merger_index++;
 
       if (merger_index < mergers.size()) {
@@ -508,8 +511,8 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
       return ToFinalSegmentation(context, unmapped_glyph_handling_);
     }
 
-    const auto& [merged_segment_index, modified_gids] = *merged;
-    last_merged_segment_index = merged_segment_index;
+    InvalidationSet modified = std::move(*maybe_modified);
+    last_merged_segment_index = modified.base_segment;
 
     GlyphSet analysis_modified_gids;
     if (!context.InertSegments().contains(last_merged_segment_index)) {
@@ -518,9 +521,10 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
       analysis_modified_gids =
           TRY(context.ReprocessSegment(last_merged_segment_index));
     }
-    analysis_modified_gids.union_set(modified_gids);
 
-    TRYV(context.GroupGlyphs(analysis_modified_gids));
+    modified.glyphs.union_set(analysis_modified_gids);
+
+    TRYV(context.GroupGlyphs(modified.glyphs, modified.segments));
 
     context.glyph_closure_cache.LogClosureCount("Condition grouping");
   }
@@ -558,7 +562,7 @@ ClosureGlyphSegmenter::InitializeSegmentationContext(
 
   GlyphSet all_glyphs;
   all_glyphs.insert_range(0, glyph_count - 1);
-  TRYV(context.GroupGlyphs(all_glyphs));
+  TRYV(context.GroupGlyphs(all_glyphs, {}));
   context.glyph_closure_cache.LogClosureCount("Condition grouping");
 
   return context;
