@@ -8,8 +8,11 @@ namespace ift::encoder {
 
 RequestedSegmentationInformation::RequestedSegmentationInformation(
     std::vector<Segment> segments, SubsetDefinition init_font_segment,
-    GlyphClosureCache& closure_cache)
-    : segments_(std::move(segments)), init_font_segment_() {
+    GlyphClosureCache& closure_cache,
+    UnmappedGlyphHandling unmapped_glyph_handling)
+    : segments_(std::move(segments)),
+      init_font_segment_(),
+      unmapped_glyph_handling_(unmapped_glyph_handling) {
   ReassignInitSubset(closure_cache, std::move(init_font_segment));
 
   segments_disjoint_ = true;

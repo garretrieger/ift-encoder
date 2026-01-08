@@ -88,7 +88,8 @@ Status ValidateIncrementalGroupings(hb_face_t* face,
                                     const SegmentationContext& context) {
   SegmentationContext non_incremental_context(
       face, context.SegmentationInfo().InitFontSegment(),
-      context.SegmentationInfo().Segments(), 1, 1);
+      context.SegmentationInfo().Segments(),
+      context.SegmentationInfo().GetUnmappedGlyphHandling(), 1, 1);
 
   // Compute the glyph groupings/conditions from scratch to compare against the
   // incrementall produced ones.
@@ -379,7 +380,7 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
   }
 
   return CodepointToGlyphSegments(face, initial_segment, subset_definitions,
-                                  merge_groups, PATCH);
+                                  merge_groups);
 }
 
 StatusOr<std::vector<Merger>> ToMergers(
@@ -423,8 +424,7 @@ static StatusOr<GlyphSegmentation> ToFinalSegmentation(
 StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
     hb_face_t* face, SubsetDefinition initial_segment,
     const std::vector<SubsetDefinition>& subset_definitions,
-    btree_map<SegmentSet, MergeStrategy> merge_groups,
-    UnmappedGlyphHandling unmapped_glyph_handling) const {
+    btree_map<SegmentSet, MergeStrategy> merge_groups) const {
   for (const auto& [segments, strategy] : merge_groups) {
     if (strategy.UseCosts()) {
       TRYV(CheckForDisjointCodepoints(subset_definitions, segments));
@@ -467,7 +467,7 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
   // if requested any remaining fallback glyphs are also moved into the init
   // font.
   GlyphSet fallback_glyphs = context.glyph_groupings.FallbackGlyphs();
-  if (unmapped_glyph_handling == MOVE_TO_INIT_FONT &&
+  if (unmapped_glyph_handling_ == MOVE_TO_INIT_FONT &&
       !fallback_glyphs.empty()) {
     VLOG(0) << "Moving " << fallback_glyphs.size()
             << " fallback glyphs into the initial font." << std::endl;
@@ -478,7 +478,7 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
 
   if (merge_groups.empty()) {
     // No merging will be needed so we're done.
-    return ToFinalSegmentation(context, unmapped_glyph_handling);
+    return ToFinalSegmentation(context, unmapped_glyph_handling_);
   }
 
   // ### Iteratively merge segments and incrementally reprocess affected data.
@@ -525,7 +525,7 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
         merger.LogMergedSizeHistogram();
       }
 
-      return ToFinalSegmentation(context, unmapped_glyph_handling);
+      return ToFinalSegmentation(context, unmapped_glyph_handling_);
     }
 
     const auto& [merged_segment_index, modified_gids] = *merged;
@@ -562,7 +562,8 @@ ClosureGlyphSegmenter::InitializeSegmentationContext(
   AddInitSubsetDefaults(initial_segment);
 
   // No merging is done during init.
-  SegmentationContext context(face, initial_segment, segments, brotli_quality_,
+  SegmentationContext context(face, initial_segment, segments,
+                              unmapped_glyph_handling_, brotli_quality_,
                               init_font_merging_brotli_quality_);
 
   // ### Generate the initial conditions and groupings by processing all
