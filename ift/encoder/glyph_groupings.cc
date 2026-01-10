@@ -305,10 +305,11 @@ Status GlyphGroupings::FindFallbackGlyphConditions(
     return absl::OkStatus();
   }
 
+  // TODO XXXX utilize inscope segments.
   btree_map<SegmentSet, GlyphSet> complex_conditions =
       TRY(FindSupersetDisjunctiveConditionsFor(
           segmentation_info, glyph_condition_set, closure_cache,
-          unmapped_glyphs_));
+          unmapped_glyphs_, SegmentSet::all()));
 
   unmapped_glyphs_.clear();
   for (const auto& [s, g] : complex_conditions) {

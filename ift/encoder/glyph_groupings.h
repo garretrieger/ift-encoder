@@ -179,7 +179,8 @@ class GlyphGroupings {
   // condition.
   void InvalidateGlyphInformation(uint32_t gid);
 
-  absl::Status RecomputeCombinedConditionsIfNeeded(const common::GlyphSet& modified_glyphs) {
+  absl::Status RecomputeCombinedConditionsIfNeeded(
+      const common::GlyphSet& modified_glyphs) {
     if (!combined_patches_dirty_) {
       for (glyph_id_t gid : modified_glyphs) {
         if (TRY(combined_patches_.GlyphsFor(gid)).size() > 1) {
