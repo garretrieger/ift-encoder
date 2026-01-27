@@ -5,6 +5,7 @@
 
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "common/font_data.h"
 #include "common/int_set.h"
@@ -101,6 +102,7 @@ class DependencyClosure {
     bool IsUnicode() const { return type_ == UNICODE; };
     bool IsGlyph() const { return type_ == GLYPH; };
     bool IsSegment() const { return type_ == SEGMENT; };
+
     uint32_t Id() const { return id_; }
 
     std::string ToString() const {
@@ -141,14 +143,52 @@ class DependencyClosure {
     NodeType type_;
   };
 
+  class TraversalRecord {
+    uint64_t visited_count_ = 0;
+    absl::flat_hash_set<absl::flat_hash_set<Node>> requirements_;
+
+   public:
+    void Visit(const Node& from) {
+      // TODO XXXX pass down conditions in from.
+      visited_count_++;
+    }
+
+    void Visit(const Node& from, absl::flat_hash_set<Node> required_nodes) {
+      Visit(from);
+      if (!required_nodes.empty()) {
+        requirements_.insert(required_nodes);
+      }
+    }
+
+    uint64_t VisitedCount() const {
+      return visited_count_;
+    }
+
+   private:
+    bool IsVisited() const {
+      return visited_count_ > 0;
+    }
+
+    bool HasRequirements() const {
+      return !requirements_.empty();
+    }
+
+    bool RequirementsSatisfied(const absl::flat_hash_map<Node, TraversalRecord>& traversal) const;
+  };
+
+  struct VariationSelectorEdge {
+    hb_codepoint_t unicode;
+    hb_codepoint_t gid;
+  };
+
   DependencyClosure(const RequestedSegmentationInformation* segmentation_info,
                     hb_face_t* face, common::IntSet full_feature_set)
       : segmentation_info_(segmentation_info),
         original_face_(common::make_hb_face(hb_face_reference(face))),
         full_feature_set_(full_feature_set),
         unicode_to_gid_(UnicodeToGid(face)),
-        dependency_graph_(hb_depend_from_face(face), &hb_depend_destroy),
-        incoming_edge_count_() {
+        dependency_graph_(hb_depend_from_face(face), &hb_depend_destroy) {
+    variation_selector_implied_edges_ = ComputeUVSEdges();
     incoming_edge_count_ = ComputeIncomingEdgeCount();
     context_glyphs_ = CollectContextGlyphs(original_face_.get(), full_feature_set_);
   }
@@ -164,35 +204,36 @@ class DependencyClosure {
   // Traverse the full depedency graph (segments, unicodes, and gids), starting at one or more
   // specific unicode values.
   AnalysisAccuracy TraverseGraph(const absl::btree_set<Node>& nodes,
-                     absl::flat_hash_map<Node, unsigned>& traversed_edges) const;
+                     absl::flat_hash_map<Node, TraversalRecord>& traversal) const;
 
   // Traverse the glyph only portion of the dependency graph.
   AnalysisAccuracy TraverseGlyphGraph(const common::GlyphSet& glyphs,
-                          absl::flat_hash_map<Node, unsigned>& traversed_edges) const;
+                          absl::flat_hash_map<Node, TraversalRecord>& traversal) const;
 
   AnalysisAccuracy HandleUnicodeOutgoingEdges(
-    hb_codepoint_t unicode,
+    Node source,
     std::vector<Node>& next,
-    absl::flat_hash_map<Node, unsigned>& traversed_edges
+    absl::flat_hash_map<Node, TraversalRecord>& traversal
   ) const;
 
   AnalysisAccuracy HandleGlyphOutgoingEdges(
-    glyph_id_t gid,
+    Node source,
     std::vector<Node>& next,
-    absl::flat_hash_map<Node, unsigned>& traversed_edges
+    absl::flat_hash_map<Node, TraversalRecord>& traversal
   ) const;
 
   AnalysisAccuracy HandleSegmentOutgoingEdges(
-    segment_index_t id,
+    Node source,
     std::vector<Node>& next,
-    absl::flat_hash_map<Node, unsigned>& traversed_edges
+    absl::flat_hash_map<Node, TraversalRecord>& traversal
   ) const;
 
   static absl::StatusOr<common::IntSet> FullFeatureSet(
       const RequestedSegmentationInformation* segmentation_info,
       hb_face_t* face);
 
-  absl::flat_hash_map<Node, glyph_id_t> ComputeIncomingEdgeCount() const;
+  absl::flat_hash_map<Node, uint64_t> ComputeIncomingEdgeCount() const;
+  absl::flat_hash_map<hb_codepoint_t, std::vector<VariationSelectorEdge>> ComputeUVSEdges() const;
 
   static absl::flat_hash_map<hb_codepoint_t, glyph_id_t> UnicodeToGid(
       hb_face_t* face);
@@ -205,7 +246,8 @@ class DependencyClosure {
 
   absl::flat_hash_map<hb_codepoint_t, glyph_id_t> unicode_to_gid_;
   std::unique_ptr<hb_depend_t, decltype(&hb_depend_destroy)> dependency_graph_;
-  absl::flat_hash_map<Node, unsigned> incoming_edge_count_;
+  absl::flat_hash_map<hb_codepoint_t, std::vector<VariationSelectorEdge>> variation_selector_implied_edges_;
+  absl::flat_hash_map<Node, uint64_t> incoming_edge_count_;
 
   // These glyphs may participate in complex substitutions and as a result we can't
   // analyze via the dep graph.

@@ -19,11 +19,20 @@ using common::hb_set_unique_ptr;
 
 namespace ift::encoder {
 
+static constexpr hb_tag_t GSUB = HB_TAG('G', 'S', 'U', 'B');
+static constexpr hb_tag_t cmap = HB_TAG('c', 'm', 'a', 'p');
+
 bool DependencyClosure::ShouldFollowEdge(
   hb_tag_t table_tag,
   glyph_id_t from_gid,
   glyph_id_t to_gid,
   hb_tag_t feature_tag) const {
+
+  if (table_tag == cmap) {
+    // cmap UVS edges are handled via the variation_selector_implied_edges_ structure
+    // so ignore all cmap edges from the dep graph.
+    return false;
+  }
 
   const GlyphSet& closure_glyphs = segmentation_info_->NonInitFontGlyphs();
   bool r = closure_glyphs.contains(to_gid) &&
@@ -63,8 +72,7 @@ static DependencyClosure::AnalysisAccuracy AccuracyForTableTag(hb_tag_t tag) {
   // - cmap: needs special handling for UVS
   // - gsub: needs special handling based on the lookup type (support the "simple" GSUB types).
   // - CFF/CFF2: investigate if seac components need any special handling.
-  if (tag == HB_TAG('G', 'S', 'U', 'B') ||
-         tag == HB_TAG('c', 'm', 'a', 'p') ||
+  if (tag == GSUB ||
          tag == HB_TAG('C', 'F', 'F', ' ') || tag == HB_TAG('C', 'F', 'F', '2')) {
     return DependencyClosure::INACCURATE;
   }
@@ -73,10 +81,11 @@ static DependencyClosure::AnalysisAccuracy AccuracyForTableTag(hb_tag_t tag) {
 
 
 DependencyClosure::AnalysisAccuracy DependencyClosure::HandleUnicodeOutgoingEdges(
-    hb_codepoint_t unicode,
+    Node source,
     std::vector<Node>& next,
-    absl::flat_hash_map<Node, unsigned>& traversed_edges
+    flat_hash_map<Node, TraversalRecord>& traversal
 ) const {
+  hb_codepoint_t unicode = source.Id();
 
   auto it = unicode_to_gid_.find(unicode);
   if (it == unicode_to_gid_.end()) {
@@ -84,11 +93,23 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::HandleUnicodeOutgoingEdge
     return ACCURATE;
   }
 
-
   if (segmentation_info_->NonInitFontGlyphs().contains(it->second)) {
     Node node = Node::Glyph(it->second);
-    traversed_edges[node]++;
+    traversal[node].Visit(source);
     next.push_back(node);
+  }
+
+  // Add implied variation selector edges:
+  auto vs_edges = variation_selector_implied_edges_.find(unicode);
+  if (vs_edges != variation_selector_implied_edges_.end()) {
+    for (VariationSelectorEdge edge : vs_edges->second) {
+      Node node = Node::Glyph(edge.gid);
+      traversal[node].Visit(source, {
+        Node::Unicode(unicode),
+        Node::Unicode(edge.unicode)
+      });
+      next.push_back(node);
+    }
   }
 
   // The subsetter adds unicode bidi mirrors for any unicode codepoints,
@@ -97,7 +118,7 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::HandleUnicodeOutgoingEdge
   hb_codepoint_t mirror = hb_unicode_mirroring(unicode_funcs, unicode);
   if (mirror != unicode && !segmentation_info_->InitFontSegment().codepoints.contains(mirror)) {
     Node node = Node::Unicode(mirror);
-    traversed_edges[node]++;
+    traversal[node].Visit(source);
     next.push_back(node);
   }
 
@@ -105,10 +126,12 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::HandleUnicodeOutgoingEdge
 }
 
 DependencyClosure::AnalysisAccuracy DependencyClosure::HandleGlyphOutgoingEdges(
-    glyph_id_t gid,
+    Node source,
     std::vector<Node>& next,
-    absl::flat_hash_map<Node, unsigned>& traversed_edges
+    flat_hash_map<Node, TraversalRecord>& traversal
 ) const {
+  glyph_id_t gid = source.Id();
+
   hb_codepoint_t index = 0;
   hb_tag_t table_tag = HB_CODEPOINT_INVALID;
   hb_codepoint_t dep_gid = HB_CODEPOINT_INVALID;
@@ -124,7 +147,7 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::HandleGlyphOutgoingEdges(
     accuracy = Combine(accuracy, AccuracyForTableTag(table_tag));
 
     Node node = Node::Glyph(dep_gid);
-    traversed_edges[node]++;
+    traversal[node].Visit(source);
     next.push_back(node);
   }
 
@@ -132,10 +155,11 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::HandleGlyphOutgoingEdges(
 }
 
 DependencyClosure::AnalysisAccuracy DependencyClosure::HandleSegmentOutgoingEdges(
-    segment_index_t id,
+    Node source,
     std::vector<Node>& next,
-    absl::flat_hash_map<Node, unsigned>& traversed_edges
+    flat_hash_map<Node, TraversalRecord>& traversal
   ) const {
+  segment_index_t id = source.Id();
 
   if (id >= segmentation_info_->Segments().size()) {
     // Unknown segment has no outgoing edges.
@@ -148,7 +172,7 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::HandleSegmentOutgoingEdge
       continue;
     }
     Node node = Node::Unicode(u);
-    traversed_edges[node]++;
+    traversal[node].Visit(source);
     next.push_back(node);
   }
 
@@ -156,13 +180,13 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::HandleSegmentOutgoingEdge
 }
 
 DependencyClosure::AnalysisAccuracy DependencyClosure::TraverseGraph(const absl::btree_set<Node>& nodes,
-                                      flat_hash_map<Node, unsigned>& traversed_edges) const {
+                                      flat_hash_map<Node, TraversalRecord>& traversal) const {
   VLOG(1) << "DependencyClosure::TraverseGraph(...)";
   std::vector<Node> next;
   for (Node node : nodes) {
     next.push_back(node);
-    // Ensure an edge count entry exists.
-    traversed_edges.insert(std::pair(node, 0));
+    // Ensure a traversal record exists.
+    traversal.insert(std::pair(node, TraversalRecord()));
   }
 
   AnalysisAccuracy accuracy = ACCURATE;
@@ -181,15 +205,15 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::TraverseGraph(const absl:
     }
 
     if (node.IsGlyph()) {
-      accuracy = Combine(accuracy, HandleGlyphOutgoingEdges(node.Id(), next, traversed_edges));
+      accuracy = Combine(accuracy, HandleGlyphOutgoingEdges(node, next, traversal));
     }
 
     if (node.IsUnicode()) {
-      accuracy = Combine(accuracy, HandleUnicodeOutgoingEdges(node.Id(), next, traversed_edges));
+      accuracy = Combine(accuracy, HandleUnicodeOutgoingEdges(node, next, traversal));
     }
 
     if (node.IsSegment()) {
-      accuracy = Combine(accuracy, HandleSegmentOutgoingEdges(node.Id(), next, traversed_edges));
+      accuracy = Combine(accuracy, HandleSegmentOutgoingEdges(node, next, traversal));
     }
   }
 
@@ -197,17 +221,18 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::TraverseGraph(const absl:
 }
 
 DependencyClosure::AnalysisAccuracy DependencyClosure::TraverseGlyphGraph(
+    // TODO XXXX this likely needs to distinguish disjunctive/conjunctive glyphs...
     const common::GlyphSet& glyphs,
-    absl::flat_hash_map<Node, unsigned>& traversed_edges) const {
+    flat_hash_map<Node, TraversalRecord>& traversal) const {
   VLOG(1) << "DependencyClosure::TraverseGlyphGraph(" << glyphs.ToString() << ")";
   btree_set<Node> nodes;
   for (glyph_id_t gid : glyphs) {
     nodes.insert(Node::Glyph(gid));
   }
-  return TraverseGraph(nodes, traversed_edges);
+  return TraverseGraph(nodes, traversal);
 }
 
-flat_hash_map<DependencyClosure::Node, glyph_id_t>
+flat_hash_map<DependencyClosure::Node, uint64_t>
 DependencyClosure::ComputeIncomingEdgeCount() const {
   VLOG(1) << "DependencyClosure::ComputeIncomingEdgeCount()";
 
@@ -219,8 +244,13 @@ DependencyClosure::ComputeIncomingEdgeCount() const {
     nodes.insert(Node::Segment(s));
   }
 
-  flat_hash_map<Node, glyph_id_t> incoming_edge_counts;
-  TraverseGraph(nodes, incoming_edge_counts);
+  flat_hash_map<Node, TraversalRecord> traversal;
+  TraverseGraph(nodes, traversal);
+
+  flat_hash_map<Node, uint64_t> incoming_edge_counts;
+  for (const auto& [n, t] : traversal) {
+    incoming_edge_counts[n] = t.VisitedCount();
+  }
   return incoming_edge_counts;
 }
 
@@ -288,6 +318,17 @@ StatusOr<DependencyClosure::AnalysisAccuracy> DependencyClosure::AnalyzeSegment(
   // - Handle simple disjunctive GSUB lookups (may need conjunction with features).
   // - Handle simple conjunctive GSUB lookups (eg. liga)
   // - Handle features in the input segment (once GSUB is supported).
+
+  // TODO XXXXX when encountering UVS edges, the following preconditions need verifying for an accurate
+  // analysis:
+  //
+  // - each UVS substituted gid can be reachable by only one UVS mapping (no other incoming edges)
+  // - Source nodes on incoming UVS edges must be exclusive to exactly one segment.
+  // - the subgraph of a conjunctive glyph must be exclusive to the segments involved in the conjunctive
+  //   condition.
+  //
+  // For a given glyph which is reachable via conjunction by segments a, b then we can get accurate conditions if:
+  // - that glyph is conjunctive on only two segments (s_a AND s_b), or it is exclusive to either s_a or s_b.
   btree_set<Node> start_nodes;
   for (segment_index_t segment_id : segments) {
     if (segment_id >= segmentation_info_->Segments().size()) {
@@ -309,32 +350,32 @@ StatusOr<DependencyClosure::AnalysisAccuracy> DependencyClosure::AnalyzeSegment(
     start_nodes.insert(Node::Segment(segment_id));
   }
 
-  flat_hash_map<Node, unsigned> traversed_edge_counts;
-  if (TraverseGraph(start_nodes, traversed_edge_counts) == INACCURATE) {
+  flat_hash_map<Node, TraversalRecord> traversal;
+  if (TraverseGraph(start_nodes, traversal) == INACCURATE) {
     inaccurate_results_++;
     return INACCURATE;
   }
 
   btree_set<Node> shared_nodes; // set of nodes which are accessible from outside this subgraph.
-  for (auto [node, count] : traversed_edge_counts) {
+  for (auto [node, record] : traversal) {
     unsigned incoming_edge_count = incoming_edge_count_.at(node);
 
     if (node.IsGlyph()) {
       exclusive_gids.insert(node.Id());
     }
 
-    if (count < incoming_edge_count) {
+    if (record.VisitedCount() < incoming_edge_count) {
       shared_nodes.insert(node);
-    } else if (count != incoming_edge_count) {
+    } else if (record.VisitedCount() != incoming_edge_count) {
       return absl::InternalError(absl::StrCat(
         "Should not happen traversed incoming edge count is greater than "
-        "the precomputed incoming edge counts: ", node.ToString(), " = ", count, " > ", incoming_edge_count));
+        "the precomputed incoming edge counts: ", node.ToString(), " = ", record.VisitedCount(), " > ", incoming_edge_count));
     }
   }
 
   // We need to find glyphs that are reachable from other segments, which are those
   // glyphs that are reachable from any shared_glyphs found above.
-  flat_hash_map<Node, unsigned> all_shared_nodes;
+  flat_hash_map<Node, TraversalRecord> all_shared_nodes;
   if (TraverseGraph(shared_nodes, all_shared_nodes) == INACCURATE) {
     inaccurate_results_++;
     return INACCURATE;
@@ -358,7 +399,6 @@ StatusOr<DependencyClosure::AnalysisAccuracy> DependencyClosure::AnalyzeSegment(
 // these glyphs are context for the lookups and as a result may interact with them despite
 // not being directly recorded in the dep graph.
 GlyphSet DependencyClosure::CollectContextGlyphs(hb_face_t* face, const IntSet& full_feature_set) {
-  constexpr hb_tag_t GSUB = HB_TAG('G', 'S', 'U', 'B');
   std::vector<hb_tag_t> feature_array = full_feature_set.to_vector();
   feature_array.push_back(0); // hb takes null terminated arrays.
 
@@ -380,6 +420,56 @@ GlyphSet DependencyClosure::CollectContextGlyphs(hb_face_t* face, const IntSet& 
   context.union_from(glyphs_after.get());
 
   return context;
+}
+
+flat_hash_map<hb_codepoint_t, std::vector<DependencyClosure::VariationSelectorEdge>> DependencyClosure::ComputeUVSEdges() const {
+  flat_hash_map<hb_codepoint_t, std::vector<VariationSelectorEdge>> edges;
+  for (auto [u, gid] : unicode_to_gid_) {
+    hb_codepoint_t index = 0;
+    hb_tag_t table_tag = HB_CODEPOINT_INVALID;
+    hb_codepoint_t dep_gid = HB_CODEPOINT_INVALID;
+    hb_codepoint_t variation_selector = HB_CODEPOINT_INVALID;
+    hb_codepoint_t ligature_set = HB_CODEPOINT_INVALID;
+    while (hb_depend_get_glyph_entry(dependency_graph_.get(), gid, index++, &table_tag,
+                                     &dep_gid, &variation_selector, &ligature_set)) {
+      if (table_tag != cmap) {
+        continue;
+      }
+
+      // each UVS edge is two edges in reality, record both:
+      edges[u].push_back(VariationSelectorEdge {
+        .unicode = variation_selector,
+        .gid = gid,
+      });
+      edges[variation_selector].push_back(VariationSelectorEdge {
+        .unicode = u,
+        .gid = gid,
+      });
+    }
+  }
+  return edges;
+}
+
+bool DependencyClosure::TraversalRecord::RequirementsSatisfied(const absl::flat_hash_map<Node, TraversalRecord>& traversal) const {
+  if (!IsVisited()) {
+    return false;
+  }
+
+  // Requirements are satisfied if at least one requirement set has all of it's nodes satisfied.
+  for (const auto& requirement_set : requirements_) {
+    // TODO XXXX do we need to worry about cycles?
+    bool all_satisfied = true;
+    for (const auto& node : requirement_set) {
+      auto it = traversal.find(node);
+      if (it == traversal.end() || !it->second.RequirementsSatisfied(traversal)) {
+        all_satisfied = false;
+      }
+    }
+    if (all_satisfied) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace ift::encoder
