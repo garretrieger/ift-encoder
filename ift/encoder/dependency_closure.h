@@ -145,9 +145,24 @@ class DependencyClosure {
 
   class TraversalRecord {
     uint64_t visited_count_ = 0;
-    absl::flat_hash_set<absl::flat_hash_set<Node>> requirements_;
+    // TODO XXXXX instead requirements can be either:
+    // - None (empty set)
+    // - One set of conjunctive nodes
+    // - Unknown/Complex
+    //
+    // Requirements default to unknown/complex.
+    // When visited with no requirements they are set to None
+    absl::flat_hash_set<Node> required_nodes_;
+    bool requirements_known_ = false;
 
    public:
+    static TraversalRecord InitNode() {
+      TraversalRecord r;
+      r.requirements_known_ = true;
+      r.visited_count_++;
+      return r;
+    }
+
     void Visit(const Node& from) {
       // TODO XXXX pass down conditions in from.
       visited_count_++;
@@ -155,9 +170,7 @@ class DependencyClosure {
 
     void Visit(const Node& from, absl::flat_hash_set<Node> required_nodes) {
       Visit(from);
-      if (!required_nodes.empty()) {
-        requirements_.insert(required_nodes);
-      }
+      // TODO XXXXX
     }
 
     uint64_t VisitedCount() const {
@@ -167,10 +180,6 @@ class DependencyClosure {
    private:
     bool IsVisited() const {
       return visited_count_ > 0;
-    }
-
-    bool HasRequirements() const {
-      return !requirements_.empty();
     }
 
     bool RequirementsSatisfied(const absl::flat_hash_map<Node, TraversalRecord>& traversal) const;

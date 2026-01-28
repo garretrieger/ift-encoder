@@ -186,7 +186,7 @@ DependencyClosure::AnalysisAccuracy DependencyClosure::TraverseGraph(const absl:
   for (Node node : nodes) {
     next.push_back(node);
     // Ensure a traversal record exists.
-    traversal.insert(std::pair(node, TraversalRecord()));
+    traversal.insert(std::pair(node, TraversalRecord::InitNode()));
   }
 
   AnalysisAccuracy accuracy = ACCURATE;
@@ -451,25 +451,17 @@ flat_hash_map<hb_codepoint_t, std::vector<DependencyClosure::VariationSelectorEd
 }
 
 bool DependencyClosure::TraversalRecord::RequirementsSatisfied(const absl::flat_hash_map<Node, TraversalRecord>& traversal) const {
-  if (!IsVisited()) {
+  if (!IsVisited() || !requirements_known_) {
     return false;
   }
 
-  // Requirements are satisfied if at least one requirement set has all of it's nodes satisfied.
-  for (const auto& requirement_set : requirements_) {
-    // TODO XXXX do we need to worry about cycles?
-    bool all_satisfied = true;
-    for (const auto& node : requirement_set) {
-      auto it = traversal.find(node);
-      if (it == traversal.end() || !it->second.RequirementsSatisfied(traversal)) {
-        all_satisfied = false;
-      }
-    }
-    if (all_satisfied) {
-      return true;
+  for (const auto& node : required_nodes_) {
+    auto it = traversal.find(node);
+    if (it == traversal.end() || !it->second.RequirementsSatisfied(traversal)) {
+      return false;
     }
   }
-  return false;
+  return true;
 }
 
 }  // namespace ift::encoder
