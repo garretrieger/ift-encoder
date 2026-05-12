@@ -510,6 +510,14 @@ Status Merger::CollectExclusiveCandidateMerges(
 Status Merger::CollectCompositeCandidateMerges(
     uint32_t base_segment_index,
     std::optional<CandidateMerge>& smallest_candidate_merge) {
+
+  if (!strategy_.UsePatchMerges() && strategy_.UseCosts()) {
+    // For cost based merging without patch merges this method
+    // does nothing. Cost based merging only considers patch
+    // based merges for composite candidates.
+    return absl::OkStatus();
+  }
+
   if (base_segment_index >= optimization_cutoff_segment_) {
     // We are at the optimization cutoff, so we won't evaluate any composite
     // candidates
@@ -551,14 +559,14 @@ Status Merger::CollectCompositeCandidateMerges(
       continue;
     }
 
-    auto candidate_merge = TRY(CandidateMerge::AssessSegmentMerge(
-        *this, base_segment_index, triggering_segments,
-        smallest_candidate_merge));
-    if (candidate_merge.has_value()) {
-      smallest_candidate_merge = *candidate_merge;
-    }
-
-    if (strategy_.UsePatchMerges() && next_condition.conditions().size() == 1) {
+    if (!strategy_.UseCosts()) {
+      auto candidate_merge = TRY(CandidateMerge::AssessSegmentMerge(
+          *this, base_segment_index, triggering_segments,
+          smallest_candidate_merge));
+      if (candidate_merge.has_value()) {
+        smallest_candidate_merge = *candidate_merge;
+      }
+    } else if (strategy_.UsePatchMerges() && next_condition.conditions().size() == 1) {
       // For disjunctive composite patches, also consider merging just the
       // patches together (if enabled).
       auto candidate_merge = TRY(CandidateMerge::AssessPatchMerge(
