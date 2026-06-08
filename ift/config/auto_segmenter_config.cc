@@ -535,9 +535,9 @@ static void ApplyQualityLevelTo(Quality quality, CostConfiguration& config) {
 
 static void ApplyQualityLevelTo(Quality quality, MergeGroup& merge_group) {
   if (merge_group.has_cost_config()) {
-    if (quality == ONE || quality == TWO) {
-      merge_group.mutable_cost_config()->clear_initial_font_merge_threshold();
-    }
+    //if (quality == ONE || quality == TWO) {
+    //  merge_group.mutable_cost_config()->clear_initial_font_merge_threshold();
+    //}
 
     if (quality >= ONE && quality <= SEVEN) {
       merge_group.set_preprocess_merging_group_size(kMinimumGroupSize);
@@ -575,6 +575,8 @@ static void ApplyQualityLevelTo(Quality quality, MergeGroup& merge_group) {
 
     if (merge_group.mutable_cost_config()->has_initial_font_merge_threshold()) {
       switch (quality) {
+        case ONE:
+        case TWO:
         case THREE:
           merge_group.mutable_cost_config()
               ->set_initial_font_merge_probability_threshold(0.60);
