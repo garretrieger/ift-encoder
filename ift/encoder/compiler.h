@@ -51,6 +51,13 @@ class Compiler {
   void SetJumpAhead(uint32_t count) { this->jump_ahead_ = count; }
 
   /*
+   * Configures the maximum depth of the table keyed patch graph.
+   * Defaults to 0 (unlimited depth).
+   */
+  void SetMaxDepth(uint32_t max_depth) { this->max_depth_ = max_depth; }
+  uint32_t max_depth() const { return max_depth_; }
+
+  /*
    * If enabled then for jump ahead entries preload lists will be used instead
    * of a single patch which jumps multiple levels.
    */
@@ -181,6 +188,9 @@ class Compiler {
         combined_.Union(s);
       }
     }
+
+    explicit Edge(const SubsetDefinition& value)
+        : subsets_({value}), combined_(value) {}
 
     void Add(const SubsetDefinition& s) {
       subsets_.insert(subsets_.begin(), s);
@@ -376,6 +386,14 @@ class Compiler {
                         std::vector<uint8_t>& url_template,
                         ift::common::CompatId& compat_id) const;
 
+  std::vector<SubsetDefinition> RemainingSubsets(
+      const SubsetDefinition& node_subset) const;
+  SubsetDefinition RemainingSubsetDefinition(
+      const SubsetDefinition& node_subset) const;
+  std::vector<Edge> OutgoingEdgesWithMaxDepth(
+      const ProcessingContext& context,
+      const SubsetDefinition& node_subset) const;
+
   ift::common::hb_face_unique_ptr face_;
   absl::btree_map<uint32_t, ift::common::IntSet> glyph_data_patches_;
   std::vector<proto::PatchMap::Entry> glyph_patch_conditions_;
@@ -383,6 +401,7 @@ class Compiler {
   SubsetDefinition init_subset_;
   std::vector<SubsetDefinition> extension_subsets_;
   uint32_t jump_ahead_ = 1;
+  uint32_t max_depth_ = 0;
   uint32_t next_id_ = 0;
   bool use_prefetch_lists_ = false;
   bool woff2_encode_ = false;
@@ -400,6 +419,7 @@ class Compiler {
     ift::common::FontData fully_expanded_subset_;
     bool force_long_loca_and_gvar_ = false;
 
+    size_t initial_remaining_subsets_count_ = 0;
     uint32_t next_id_ = 0;
     uint32_t next_patch_set_id_ =
         1;  // id 0 is reserved for table keyed patches.

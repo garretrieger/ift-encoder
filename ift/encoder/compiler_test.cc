@@ -42,6 +42,7 @@ using ift::common::CodepointSet;
 using ift::common::FontData;
 using ift::common::FontHelper;
 using ift::common::GlyphSet;
+using ift::common::hb_face_unique_ptr;
 using ift::common::IntSet;
 using ift::common::make_hb_set;
 using ift::proto::DEFAULT_ENCODING;
@@ -844,6 +845,232 @@ TEST_F(CompilerTest, Encode_FourSubsets_WithJumpAhead_AndPreload) {
       {"acd", {"abcd"}},         {"abcd", {}},
   };
   ASSERT_EQ(g, expected);
+}
+
+TEST_F(CompilerTest, Encode_FourSubsets_MaxDepth_2) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetMaxDepth(2);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  graph g;
+  auto sc = ToGraph(*encoding, g);
+  ASSERT_TRUE(sc.ok()) << sc;
+
+  graph expected{
+      {"a", {"ab", "ac", "ad"}},
+      {"ab", {"abcd"}},
+      {"ac", {"abcd"}},
+      {"ad", {"abcd"}},
+      {"abcd", {}},
+  };
+  ASSERT_EQ(g, expected);
+}
+
+TEST_F(CompilerTest, Encode_FourSubsets_MaxDepth_1) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetMaxDepth(1);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  graph g;
+  auto sc = ToGraph(*encoding, g);
+  ASSERT_TRUE(sc.ok()) << sc;
+
+  graph expected{
+      {"a", {"abcd"}},
+      {"abcd", {}},
+  };
+  ASSERT_EQ(g, expected);
+}
+
+TEST_F(CompilerTest, Encode_FourSubsets_MaxDepth_3) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetMaxDepth(3);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  graph g;
+  auto sc = ToGraph(*encoding, g);
+  ASSERT_TRUE(sc.ok()) << sc;
+
+  graph expected{
+      {"a", {"ab", "ac", "ad"}}, {"ab", {"abc", "abd"}}, {"ac", {"abc", "acd"}},
+      {"ad", {"abd", "acd"}},    {"abc", {"abcd"}},      {"abd", {"abcd"}},
+      {"acd", {"abcd"}},         {"abcd", {}},
+  };
+  ASSERT_EQ(g, expected);
+}
+
+TEST_F(CompilerTest, Encode_FourSubsets_MaxDepth_2_WithJumpAhead) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetJumpAhead(2);
+  compiler.SetMaxDepth(2);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  graph g;
+  auto sc = ToGraph(*encoding, g);
+  ASSERT_TRUE(sc.ok()) << sc;
+
+  graph expected{
+      {"a", {"ab", "ac", "ad", "abcd"}},
+      {"ab", {"abcd"}},
+      {"ac", {"abcd"}},
+      {"ad", {"abcd"}},
+      {"abcd", {}},
+  };
+  ASSERT_EQ(g, expected);
+}
+
+TEST_F(CompilerTest, Encode_FourSubsets_MaxDepth_2_WithJumpAhead_AndPreload) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetJumpAhead(2);
+  compiler.SetUsePrefetchLists(true);
+  compiler.SetMaxDepth(2);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  graph g;
+  auto sc = ToGraph(*encoding, g);
+  ASSERT_TRUE(sc.ok()) << sc;
+
+  graph expected{
+      {"a", {"ab", "ac", "ad", "abcd"}},
+      {"ab", {"abcd"}},
+      {"ac", {"abcd"}},
+      {"ad", {"abcd"}},
+      {"abcd", {}},
+  };
+  ASSERT_EQ(g, expected);
+}
+
+TEST_F(CompilerTest, Encode_FourSubsets_MaxDepth_3_WithJumpAhead) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetJumpAhead(2);
+  compiler.SetMaxDepth(3);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  graph g;
+  auto sc = ToGraph(*encoding, g);
+  ASSERT_TRUE(sc.ok()) << sc;
+
+  graph expected{
+      {"a", {"ab", "ac", "ad", "abc", "abd", "acd"}},
+      {"ab", {"abc", "abd", "abcd"}},
+      {"ac", {"abc", "acd", "abcd"}},
+      {"ad", {"abd", "acd", "abcd"}},
+      {"abc", {"abcd"}},
+      {"abd", {"abcd"}},
+      {"acd", {"abcd"}},
+      {"abcd", {}},
+  };
+  ASSERT_EQ(g, expected);
+}
+
+TEST_F(CompilerTest, Encode_FourSubsets_MaxDepth_2_ClientExtend) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetMaxDepth(2);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  // Client requesting 'b' should take at most 1 round trip
+  auto extended = ift::client::Extend(*encoding, IntSet{'b'}, 1, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
+
+  // Client requesting 'b' and 'c' should take at most 2 round trips
+  extended = ift::client::Extend(*encoding, IntSet{'b', 'c'}, 2, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
+
+  // Client requesting all 'b', 'c', 'd' should take at most 2 round trips
+  extended =
+      ift::client::Extend(*encoding, IntSet{'b', 'c', 'd'}, 2, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
 }
 
 void ClearCompatIdFromFormat2(uint8_t* data) {

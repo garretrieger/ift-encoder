@@ -104,8 +104,6 @@ message SegmentationPlan {
   // only a single patch which adds everything remaining.
   //
   // Defaults to unlimited depth.
-  //
-  // Note: this is currently UNIMPLEMENTED in the encoder.
   uint32 max_depth = 6;
 
   // In the generated table keyed patch graph every node (in addition to the usual patches) will

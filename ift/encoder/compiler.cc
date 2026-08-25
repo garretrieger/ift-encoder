@@ -103,8 +103,8 @@ StatusOr<FontData> Compiler::FullyExpandedSubset(
   return CutSubset(context, face_.get(), all, false);
 }
 
-std::vector<Compiler::Edge> Compiler::OutgoingEdges(
-    const SubsetDefinition& node_subset, uint32_t choose) const {
+std::vector<SubsetDefinition> Compiler::RemainingSubsets(
+    const SubsetDefinition& node_subset) const {
   std::vector<SubsetDefinition> remaining_subsets;
   for (const auto& s : extension_subsets_) {
     SubsetDefinition filtered = s;
@@ -115,6 +115,22 @@ std::vector<Compiler::Edge> Compiler::OutgoingEdges(
 
     remaining_subsets.push_back(std::move(filtered));
   }
+  return remaining_subsets;
+}
+
+SubsetDefinition Compiler::RemainingSubsetDefinition(
+    const SubsetDefinition& node_subset) const {
+  SubsetDefinition remaining;
+  for (const auto& s : RemainingSubsets(node_subset)) {
+    remaining.Union(s);
+  }
+  return remaining;
+}
+
+std::vector<Compiler::Edge> Compiler::OutgoingEdges(
+    const SubsetDefinition& node_subset, uint32_t choose) const {
+  std::vector<SubsetDefinition> remaining_subsets =
+      RemainingSubsets(node_subset);
 
   std::vector<const SubsetDefinition*> input;
   for (const auto& s : remaining_subsets) {
@@ -127,6 +143,40 @@ std::vector<Compiler::Edge> Compiler::OutgoingEdges(
   }
 
   return result;
+}
+
+std::vector<Compiler::Edge> Compiler::OutgoingEdgesWithMaxDepth(
+    const ProcessingContext& context,
+    const SubsetDefinition& node_subset) const {
+  std::vector<Edge> edges {};
+  std::vector<SubsetDefinition> remaining_subsets =
+      RemainingSubsets(node_subset);
+  if (remaining_subsets.empty()) {
+    return edges;
+  }
+
+  bool depth_is_limited = max_depth_ > 0;
+
+  // The init font node is considered depth 0, one subset added is depth 1, and so on.
+  size_t depth =
+      context.initial_remaining_subsets_count_ - remaining_subsets.size();
+
+  // Jump ahead needs to be restricted to jump to at most the second last depth
+  uint32_t choose = jump_ahead_;
+  if (depth_is_limited && depth + choose >= max_depth_) {
+    choose = max_depth_ - 1 - depth;
+  }
+
+  if (choose > 0) {
+    edges = OutgoingEdges(node_subset, choose);
+  }
+
+  if (choose != jump_ahead_ && remaining_subsets.size() >= max_depth_ - depth) {
+    // Lastly if jump ahead can reach the max depth then we should include a jump to add all remaining subsets.
+    edges.push_back(Edge{ RemainingSubsetDefinition(node_subset) });
+  }
+
+  return edges;
 }
 
 Status Compiler::AddGlyphDataPatch(uint32_t id, const IntSet& gids) {
@@ -210,6 +260,8 @@ StatusOr<Compiler::Encoding> Compiler::Compile() const {
   ProcessingContext context(next_id_);
   context.init_subset_ = init_subset_;
   AddInitSubsetDefaults(context.init_subset_);
+  context.initial_remaining_subsets_count_ =
+      RemainingSubsets(context.init_subset_).size();
   if (IsMixedMode()) {
     // Glyph keyed patches can't change the glyph count in the font (and hence
     // loca len) so always include the last gid in the init subset to force the
@@ -540,7 +592,7 @@ StatusOr<Compiler::CompileResult> Compiler::Compile(
                                         glyph_keyed_url_template,
                                         glyph_keyed_compat_id));
 
-  std::vector<Edge> edges = OutgoingEdges(node_subset, jump_ahead_);
+  std::vector<Edge> edges = OutgoingEdgesWithMaxDepth(context, node_subset);
 
   // The first subset forms the base file, the remaining subsets are made
   // reachable via patches.

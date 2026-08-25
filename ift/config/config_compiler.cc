@@ -150,6 +150,9 @@ Status ConfigCompiler::Configure(const SegmentationPlan& plan,
     compiler.SetJumpAhead(plan.jump_ahead());
   }
   compiler.SetUsePrefetchLists(plan.use_prefetch_lists());
+  if (plan.max_depth() > 0) {
+    compiler.SetMaxDepth(plan.max_depth());
+  }
 
   if (plan.has_advanced_settings()) {
     const auto& advanced = plan.advanced_settings();
@@ -165,10 +168,6 @@ Status ConfigCompiler::Configure(const SegmentationPlan& plan,
   if (plan.include_all_segment_patches()) {
     return absl::UnimplementedError(
         "include_all_segment_patches is not yet supported.");
-  }
-
-  if (plan.max_depth() > 0) {
-    return absl::UnimplementedError("max_depth is not yet supported.");
   }
 
   return absl::OkStatus();
