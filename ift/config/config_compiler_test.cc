@@ -25,4 +25,15 @@ TEST(ConfigCompilerTest, ConfigureOverrideUrlTemplatePrefix) {
   EXPECT_EQ(compiler.override_url_template_prefix(), expected);
 }
 
+TEST(ConfigCompilerTest, ConfigureMaxDepth) {
+  Compiler compiler;
+  SegmentationPlan plan;
+  plan.set_max_depth(3);
+
+  absl::Status status = ConfigCompiler::Configure(plan, compiler);
+  ASSERT_TRUE(status.ok()) << status;
+
+  EXPECT_EQ(compiler.max_depth(), 3);
+}
+
 }  // namespace ift::config
