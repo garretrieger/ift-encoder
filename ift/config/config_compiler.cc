@@ -153,6 +153,7 @@ Status ConfigCompiler::Configure(const SegmentationPlan& plan,
   if (plan.max_depth() > 0) {
     compiler.SetMaxDepth(plan.max_depth());
   }
+  compiler.SetIncludeAllSegmentPatches(plan.include_all_segment_patches());
 
   if (plan.has_advanced_settings()) {
     const auto& advanced = plan.advanced_settings();
@@ -162,12 +163,6 @@ Status ConfigCompiler::Configure(const SegmentationPlan& plan,
           advanced.override_url_template_prefix().end());
       compiler.SetOverrideUrlTemplatePrefix(prefix);
     }
-  }
-
-  // Check for unsupported settings
-  if (plan.include_all_segment_patches()) {
-    return absl::UnimplementedError(
-        "include_all_segment_patches is not yet supported.");
   }
 
   return absl::OkStatus();

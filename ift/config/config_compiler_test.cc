@@ -36,4 +36,15 @@ TEST(ConfigCompilerTest, ConfigureMaxDepth) {
   EXPECT_EQ(compiler.max_depth(), 3);
 }
 
+TEST(ConfigCompilerTest, ConfigureIncludeAllSegmentPatches) {
+  Compiler compiler;
+  SegmentationPlan plan;
+  plan.set_include_all_segment_patches(true);
+
+  absl::Status status = ConfigCompiler::Configure(plan, compiler);
+  ASSERT_TRUE(status.ok()) << status;
+
+  EXPECT_TRUE(compiler.include_all_segment_patches());
+}
+
 }  // namespace ift::config
