@@ -161,6 +161,13 @@ std::vector<Compiler::Edge> Compiler::OutgoingEdgesWithMaxDepth(
   size_t depth =
       context.initial_remaining_subsets_count_ - remaining_subsets.size();
 
+  size_t final_depth = context.initial_remaining_subsets_count_;
+  if (max_depth_ > 0 && max_depth_ < final_depth) {
+    final_depth = max_depth_;
+  }
+
+  bool all_is_reachable = (depth + jump_ahead_ >= final_depth);
+
   // Jump ahead needs to be restricted to jump to at most the second last depth
   uint32_t choose = jump_ahead_;
   if (depth_is_limited && depth + choose >= max_depth_) {
@@ -173,6 +180,10 @@ std::vector<Compiler::Edge> Compiler::OutgoingEdgesWithMaxDepth(
 
   if (choose != jump_ahead_ && remaining_subsets.size() >= max_depth_ - depth) {
     // Lastly if jump ahead can reach the max depth then we should include a jump to add all remaining subsets.
+    edges.push_back(Edge{ RemainingSubsetDefinition(node_subset) });
+  }
+
+  if (include_all_segment_patches_ && !all_is_reachable) {
     edges.push_back(Edge{ RemainingSubsetDefinition(node_subset) });
   }
 

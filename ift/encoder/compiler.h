@@ -63,6 +63,17 @@ class Compiler {
    */
   void SetUsePrefetchLists(bool value) { this->use_prefetch_lists_ = value; }
 
+  /*
+   * If enabled then every node in the table keyed patch graph will include
+   * an edge which adds all remaining subsets.
+   */
+  void SetIncludeAllSegmentPatches(bool value) {
+    this->include_all_segment_patches_ = value;
+  }
+  bool include_all_segment_patches() const {
+    return include_all_segment_patches_;
+  }
+
   void SetWoff2Encode(bool value) { this->woff2_encode_ = value; }
 
   void SetOverrideUrlTemplatePrefix(const std::vector<uint8_t>& prefix) {
@@ -404,6 +415,7 @@ class Compiler {
   uint32_t max_depth_ = 0;
   uint32_t next_id_ = 0;
   bool use_prefetch_lists_ = false;
+  bool include_all_segment_patches_ = false;
   bool woff2_encode_ = false;
   std::vector<uint8_t> override_url_template_prefix_;
 

@@ -1073,6 +1073,119 @@ TEST_F(CompilerTest, Encode_FourSubsets_MaxDepth_2_ClientExtend) {
   ASSERT_TRUE(extended.ok()) << extended.status();
 }
 
+TEST_F(CompilerTest, Encode_FourSubsets_IncludeAllSegmentPatches) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetIncludeAllSegmentPatches(true);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  graph g;
+  auto sc = ToGraph(*encoding, g);
+  ASSERT_TRUE(sc.ok()) << sc;
+
+  graph expected{
+      {"a", {"ab", "ac", "ad", "abcd"}},
+      {"ab", {"abc", "abd", "abcd"}},
+      {"ac", {"abc", "acd", "abcd"}},
+      {"ad", {"abd", "acd", "abcd"}},
+      {"abc", {"abcd"}},
+      {"abd", {"abcd"}},
+      {"acd", {"abcd"}},
+      {"abcd", {}},
+  };
+  ASSERT_EQ(g, expected);
+}
+
+TEST_F(CompilerTest,
+       Encode_FourSubsets_WithJumpAhead_AndPreload_IncludeAllSegmentPatches) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetJumpAhead(2);
+  compiler.SetUsePrefetchLists(true);
+  compiler.SetIncludeAllSegmentPatches(true);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  graph g;
+  auto sc = ToGraph(*encoding, g);
+  ASSERT_TRUE(sc.ok()) << sc;
+
+  graph expected{
+      {"a", {"ab", "ac", "ad", "abcd"}},
+      {"ab", {"abc", "abd"}},
+      {"ac", {"abc", "acd"}},
+      {"ad", {"abd", "acd"}},
+      {"abc", {"abcd"}},
+      {"abd", {"abcd"}},
+      {"acd", {"abcd"}},
+      {"abcd", {}},
+  };
+  ASSERT_EQ(g, expected);
+
+  // All extension operations should only ever need 1 round trip
+  auto extended = ift::client::Extend(*encoding, IntSet{'b'}, 1, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
+  extended = ift::client::Extend(*encoding, IntSet{'b', 'c'}, 1, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
+  extended = ift::client::Extend(*encoding, IntSet{'b', 'c', 'd'}, 1, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
+}
+
+TEST_F(CompilerTest, Encode_FourSubsets_IncludeAllSegmentPatches_ClientExtend) {
+  IntSet s1 = {'b'};
+  IntSet s2 = {'c'};
+  IntSet s3 = {'d'};
+  Compiler compiler;
+  compiler.SetIncludeAllSegmentPatches(true);
+  hb_face_unique_ptr face = font.face();
+  compiler.SetFace(face.get());
+  auto s = compiler.SetInitSubset(IntSet{'a'});
+  ASSERT_TRUE(s.ok()) << s;
+  compiler.AddNonGlyphDataSegment(s1);
+  compiler.AddNonGlyphDataSegment(s2);
+  compiler.AddNonGlyphDataSegment(s3);
+
+  auto encoding = compiler.Compile();
+
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+
+  // Client requesting 'b' should take at most 1 round trip
+  auto extended = ift::client::Extend(*encoding, IntSet{'b'}, 1, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
+
+  // Client requesting 'b' and 'c' should take at most 1 round trip
+  extended = ift::client::Extend(*encoding, IntSet{'b', 'c'}, 1, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
+
+  // Client requesting all 'b', 'c', 'd' should take at most 1 round trip
+  extended =
+      ift::client::Extend(*encoding, IntSet{'b', 'c', 'd'}, 1, UINT32_MAX);
+  ASSERT_TRUE(extended.ok()) << extended.status();
+}
+
 void ClearCompatIdFromFormat2(uint8_t* data) {
   for (uint32_t index = 5; index < (5 + 16); index++) {
     data[index] = 0;

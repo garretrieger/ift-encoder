@@ -110,8 +110,6 @@ message SegmentationPlan {
   // have a patch available which adds everything remaining to the font. This makes it possible
   // for the client to reach any combination of coverage in at most one round trip from any
   // intermediate (or initial) state.
-  //
-  // Note: this is currently UNIMPLEMENTED in the encoder.
   bool include_all_segment_patches = 7;
 
   // The initial_* fields defines all of the data that the initial IFT font will include. If these are all
