@@ -23,6 +23,7 @@
 #include "ift/encoder/segmentation_context.h"
 #include "ift/encoder/subset_definition.h"
 #include "ift/encoder/types.h"
+#include "ift/freq/probability_calculator.h"
 #include "ift/glyph_keyed_diff.h"
 
 namespace ift::encoder {
@@ -341,13 +342,12 @@ FindExistingCondition(
 }
 
 static StatusOr<double> CostFor(Merger& merger,
+                                const freq::ProbabilityCalculator* calculator,
                                 const ActivationCondition& condition,
                                 const GlyphSet& glyphs) {
   double probability = 1.0;
   if (!condition.IsFallback()) {
-    probability = TRY(
-        condition.Probability(merger.Context().SegmentationInfo().Segments(),
-                              *TRY(merger.Strategy().ProbabilityCalculator())));
+    probability = TRY(condition.Probability(merger.Context().SegmentationInfo().Segments(), *calculator));
   }
 
   double patch_size =
@@ -364,7 +364,10 @@ static StatusOr<double> CostFor(Merger& merger,
 StatusOr<std::pair<double, GlyphSet>> CandidateMerge::ComputeInitFontCostDelta(
     Merger& merger, uint32_t existing_init_font_size,
     const GlyphSet& moved_glyphs,
-    flat_hash_map<ift::common::GlyphSet, uint32_t>& smallest_size_increases) {
+    flat_hash_map<ift::common::GlyphSet, uint32_t>& smallest_size_increases,
+    size_t profile_index) {
+  const auto* calculator = TRY(merger.Strategy().ProbabilityCalculator(profile_index));
+
   // Brotli compression results can be a bit noisy and it's common to see very
   // different size increase (in both directions) for adding the same glyphs as
   // the base changes. So to help control some of this noise we use
@@ -441,7 +444,8 @@ StatusOr<std::pair<double, GlyphSet>> CandidateMerge::ComputeInitFontCostDelta(
     GlyphSet glyphs_after = glyphs;
     glyphs_after.subtract(glyph_closure_delta);
 
-    total_delta -= TRY(CostFor(merger, condition, glyphs));
+    total_delta -=
+        TRY(CostFor(merger, calculator, condition, glyphs));
 
     if (glyphs_after.empty()) {
       continue;
@@ -465,7 +469,8 @@ StatusOr<std::pair<double, GlyphSet>> CandidateMerge::ComputeInitFontCostDelta(
       // Existing isn't in the affected list so we need to account for it's
       // removal, and transfer it's glyphs to new_conditions.
       it->second.union_set(existing->second);
-      total_delta -= TRY(CostFor(merger, existing->first, existing->second));
+      total_delta -= TRY(CostFor(merger, calculator,
+                                 existing->first, existing->second));
     }
   }
 
@@ -474,9 +479,8 @@ StatusOr<std::pair<double, GlyphSet>> CandidateMerge::ComputeInitFontCostDelta(
     if (!condition.IsFallback()) {
       // TODO(garretrieger): XXXX also include the effect of modified segments
       // in this calc. Start with finding a test case.
-      patch_probability_after = TRY(
-          condition.Probability(merger.Context().SegmentationInfo().Segments(),
-                                *TRY(merger.Strategy().ProbabilityCalculator())));
+      patch_probability_after =
+          TRY(condition.Probability(merger.Context().SegmentationInfo().Segments(), *calculator));
     }
 
     double patch_size_after =
@@ -492,12 +496,15 @@ StatusOr<std::pair<double, GlyphSet>> CandidateMerge::ComputeInitFontCostDelta(
 
   VLOG(1) << "    = " << total_delta;
 
+
   return std::make_pair(total_delta, glyph_closure_delta);
 }
 
 StatusOr<double> CandidateMerge::ComputeBestCaseInitFontCostDelta(
     Merger& merger, uint32_t existing_init_font_size,
-    const GlyphSet& moved_glyphs) {
+    const GlyphSet& moved_glyphs, size_t profile_index) {
+  const auto* calculator = TRY(merger.Strategy().ProbabilityCalculator(profile_index));
+
   // TODO(garretrieger): consider reworking this to avoid running a glyph
   // closure, by working only with the explicitly moved glyphs.
   GlyphSet new_glyph_closure, glyph_closure_delta;
@@ -516,9 +523,8 @@ StatusOr<double> CandidateMerge::ComputeBestCaseInitFontCostDelta(
            merger.Context(), glyph_closure_delta, SegmentSet{})) {
     double patch_probability = 1.0;
     if (!condition.IsFallback()) {
-      patch_probability = TRY(
-          condition.Probability(merger.Context().SegmentationInfo().Segments(),
-                                *TRY(merger.Strategy().ProbabilityCalculator())));
+      patch_probability =
+          TRY(condition.Probability(merger.Context().SegmentationInfo().Segments(), *calculator));
     }
 
     GlyphSet new_glyphs = glyphs;
