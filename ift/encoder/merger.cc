@@ -1,5 +1,6 @@
 #include "ift/encoder/merger.h"
 
+#include <cstdint>
 #include <optional>
 
 #include "absl/flags/flag.h"
@@ -13,6 +14,7 @@
 #include "ift/encoder/types.h"
 
 using absl::btree_map;
+using absl::btree_set;
 using absl::flat_hash_map;
 using absl::Status;
 using absl::StatusOr;
@@ -22,6 +24,13 @@ using ift::common::SegmentSet;
 ABSL_FLAG(bool, record_merged_size_reductions, false,
           "When enabled the merger will record the percent size reductions of "
           "each assessed merge.");
+
+ABSL_FLAG(bool, merger_composite_filter_by_base, false,
+          "If enabled then composite merge candidates will be limited to those "
+          "that interact with the current base segment.");
+
+ABSL_FLAG(uint32_t, merger_composite_max_segment_count, UINT32_MAX,
+          "Configures the maximum number of segments that may be merged together.");
 
 namespace ift::encoder {
 
@@ -682,6 +691,11 @@ Status Merger::CollectCompositeCandidateMerges(
   ActivationCondition last_exclusive =
       ActivationCondition::exclusive_segment(UINT32_MAX, 0);
 
+  btree_set<SegmentSet> unique_merge_sets;
+
+  const uint32_t segment_count_threshold = absl::GetFlag(FLAGS_merger_composite_max_segment_count);
+  const bool must_interact_with_base = absl::GetFlag(FLAGS_merger_composite_filter_by_base);
+
   for (auto it = context_->glyph_groupings.OrderedConditions().lower_bound(
            last_exclusive);
        it != context_->glyph_groupings.OrderedConditions().end(); it++) {
@@ -694,6 +708,9 @@ Status Merger::CollectCompositeCandidateMerges(
     }
 
     SegmentSet triggering_segments = next_condition.TriggeringSegments();
+    if (must_interact_with_base && !triggering_segments.contains(base_segment_index)) {
+      continue;
+    }
 
     std::optional<unsigned> min = triggering_segments.min();
     if (min.has_value() && min >= optimization_cutoff_segment_) {
@@ -712,13 +729,29 @@ Status Merger::CollectCompositeCandidateMerges(
       continue;
     }
 
+    triggering_segments.insert(base_segment_index);
+
+    if (triggering_segments.size() == 2) {
+      // base + another segment has already been checked by CollectExclusiveCandidateMerges.
+      continue;
+    }
+
+    if (triggering_segments.size() > segment_count_threshold) {
+      continue;
+    }
+
+    unique_merge_sets.insert(std::move(triggering_segments));
+  }
+
+  for (const auto& segments : unique_merge_sets) {
     auto candidate_merge = TRY(CandidateMerge::AssessSegmentMerge(
-        *this, base_segment_index, triggering_segments,
+        *this, base_segment_index, segments,
         smallest_candidate_merge));
     if (candidate_merge.has_value()) {
       smallest_candidate_merge = *candidate_merge;
     }
   }
+
   return absl::OkStatus();
 }
 
