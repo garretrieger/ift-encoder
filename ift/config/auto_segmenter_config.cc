@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/container/btree_set.h"
+#include "absl/flags/flag.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
@@ -37,6 +38,9 @@ using ift::encoder::GlyphPartition;
 using ift::feature_registry::DefaultFeatureTags;
 using ift::freq::UnicodeFrequencies;
 
+ABSL_FLAG(double, auto_config_overlap_threshold, 0.10,
+          "% threshold to consider scripts overlapping.");
+
 namespace ift::config {
 
 // Segmentation will be configured to form groups of at least this many codepoints.
@@ -52,7 +56,7 @@ static constexpr uint64_t kMaxTableKeyedPatches = 2048;
 // Two scripts are considered to be overlapping if the codepoints they share
 // account for at least this fraction of the total probability mass of at
 // least one of the two scripts.
-static constexpr double kScriptOverlapThreshold = 0.10;
+// static constexpr double kScriptOverlapThreshold = 0.10;
 
 // Default min and max patch sizes (in bytes) for heuristic merging.
 static constexpr uint32_t kHeuristicMinPatchSize = 2500;
@@ -415,7 +419,7 @@ static StatusOr<std::vector<std::vector<std::string>>> GroupOverlappingScripts(
     VLOG(1) << "Overlap between " << scripts[i] << " and " << scripts[j]
             << " is " << fraction << " (" << shared.size()
             << " shared codepoints).";
-    if (fraction >= kScriptOverlapThreshold) {
+    if (fraction >= absl::GetFlag(FLAGS_auto_config_overlap_threshold)) {
       LOG(INFO) << "Grouping " << scripts[i] << " and " << scripts[j]
                 << " together, they share " << fraction
                 << " of their probability mass.";

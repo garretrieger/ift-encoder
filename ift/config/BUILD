@@ -100,6 +100,7 @@ cc_library(
         "//visibility:public",
     ],
     deps = [
+        "@abseil-cpp//absl/flags:flag",
         ":load_codepoints",
         ":segmentation_plan_cc_proto",
         ":segmenter_config_cc_proto",
