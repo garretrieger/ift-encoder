@@ -404,6 +404,7 @@ Status Merger::ReassignInitSubset() {
       ComputeCandidateSegments(Context(), strategy_, inscope_segments_);
   TRYV(ResetSegmentProbabilities());
   TRYV(InitOptimizationCutoff());
+  all_pairs_merger_ = AllPairsMerger();
   return absl::OkStatus();
 }
 
@@ -427,7 +428,7 @@ uint32_t Merger::AssignMergedSegment(segment_index_t base,
   if (!is_inert) {
     exclusive_sizes_dirty_ = true;
   }
-  all_pairs_merger_.AssignMergedSegment(base, to_merge);
+  all_pairs_merger_.AssignMergedSegment(*this, base, to_merge);
   candidate_segments_.subtract(to_merge);
   candidate_segments_.insert(base);
   return Context().AssignMergedSegment(base, to_merge, merged_segment,
