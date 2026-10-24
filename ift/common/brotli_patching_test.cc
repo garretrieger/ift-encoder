@@ -1,5 +1,6 @@
 #include "absl/status/status.h"
 #include "absl/types/span.h"
+#include "brotli/brotli_arena.h"
 #include "gtest/gtest.h"
 #include "ift/common/brotli_binary_diff.h"
 #include "ift/common/brotli_binary_patch.h"
@@ -122,6 +123,88 @@ TEST_F(BrotliPatchingTest, DiffAndPatchWithSmallerDerived) {
   FontData patched;
   EXPECT_EQ(patch_->Patch(full_font, patch, &patched), absl::OkStatus());
   EXPECT_EQ(Span<const char>(patched), Span<const char>(subset_a_));
+}
+
+TEST(BrotliArenaTest, BumpAllocationAndAlignment) {
+  brotli::BrotliArena arena(1024);
+  EXPECT_EQ(arena.offset(), 0);
+  EXPECT_EQ(arena.capacity(), 1024);
+
+  void* p1 = brotli::BrotliArena::Alloc(&arena, 10);
+  ASSERT_NE(p1, nullptr);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p1) % 16, 0);
+  // 16-byte header + 16-byte aligned payload = 32 bytes
+  EXPECT_EQ(arena.offset(), 32);
+
+  void* p2 = brotli::BrotliArena::Alloc(&arena, 24);
+  ASSERT_NE(p2, nullptr);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p2) % 16, 0);
+  // Previous 32 + (16-byte header + 32-byte aligned payload) = 80 bytes
+  EXPECT_EQ(arena.offset(), 80);
+
+  // LIFO free p2 then p1
+  brotli::BrotliArena::Free(&arena, p2);
+  EXPECT_EQ(arena.offset(), 32);
+
+  brotli::BrotliArena::Free(&arena, p1);
+  EXPECT_EQ(arena.offset(), 0);
+}
+
+TEST(BrotliArenaTest, ResetAndReallocation) {
+  brotli::BrotliArena arena(1024);
+  void* p1 = brotli::BrotliArena::Alloc(&arena, 64);
+  EXPECT_GT(arena.offset(), 0);
+
+  arena.Reset();
+  EXPECT_EQ(arena.offset(), 0);
+
+  void* p2 = brotli::BrotliArena::Alloc(&arena, 64);
+  EXPECT_EQ(p1, p2);  // Reuses the exact same backing memory address
+  EXPECT_GT(arena.offset(), 0);
+
+  arena.Reset();
+  EXPECT_EQ(arena.offset(), 0);
+}
+
+TEST(BrotliArenaTest, OversizedAllocationFallsBackToMalloc) {
+  brotli::BrotliArena arena(256);
+  // Allocate more than capacity
+  void* p = brotli::BrotliArena::Alloc(&arena, 1024);
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(arena.offset(), 0);  // Arena was bypassed
+
+  // Freeing fallback allocation does not corrupt arena
+  brotli::BrotliArena::Free(&arena, p);
+  EXPECT_EQ(arena.offset(), 0);
+}
+
+TEST_F(BrotliPatchingTest, DiffReusesArenaAcrossMultipleCalls) {
+  EXPECT_EQ(diff_->arena().offset(), 0);
+
+  FontData patch1;
+  EXPECT_EQ(diff_->Diff(subset_a_, subset_b_, &patch1), absl::OkStatus());
+  EXPECT_EQ(diff_->arena().offset(), 0);  // Cleaned up after call
+
+  FontData patch2;
+  EXPECT_EQ(diff_->Diff(subset_a_, subset_b_, &patch2), absl::OkStatus());
+  EXPECT_EQ(diff_->arena().offset(), 0);  // Cleaned up after call
+
+  // Output must be bit-for-bit identical across calls
+  EXPECT_EQ(Span<const char>(patch1), Span<const char>(patch2));
+
+  // Also test with quality 11 (uses H10 binary tree hasher)
+  BrotliBinaryDiff diff11(11);
+  EXPECT_EQ(diff11.arena().offset(), 0);
+
+  FontData patch11_1;
+  EXPECT_EQ(diff11.Diff(subset_a_, subset_b_, &patch11_1), absl::OkStatus());
+  EXPECT_EQ(diff11.arena().offset(), 0);
+
+  FontData patch11_2;
+  EXPECT_EQ(diff11.Diff(subset_a_, subset_b_, &patch11_2), absl::OkStatus());
+  EXPECT_EQ(diff11.arena().offset(), 0);
+
+  EXPECT_EQ(Span<const char>(patch11_1), Span<const char>(patch11_2));
 }
 
 }  // namespace ift::common
