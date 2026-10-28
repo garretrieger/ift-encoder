@@ -3,10 +3,15 @@
 #include <chrono>
 #include <vector>
 
+#include "absl/flags/flag.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "brotli/shared_brotli_encoder.h"
 #include "ift/common/font_data.h"
+
+ABSL_FLAG(bool, use_brotli_arena, true,
+          "If true, use a reusable arena allocator for brotli compression "
+          "operations.");
 
 namespace ift::common {
 
@@ -46,19 +51,26 @@ Status BrotliBinaryDiff::Diff(const FontData& font_base, string_view data,
   total_dict_bytes_ += font_base.size();
   auto start = std::chrono::high_resolution_clock::now();
 
+  brotli::BrotliArena* arena =
+      absl::GetFlag(FLAGS_use_brotli_arena) ? &arena_ : nullptr;
+
   // Reset the arena on scope exit, ensuring any allocated state and dictionary
   // are cleaned up first before offset is reset.
   struct ArenaResetGuard {
-    brotli::BrotliArena& arena;
-    ~ArenaResetGuard() { arena.Reset(); }
-  } reset_guard{arena_};
+    brotli::BrotliArena* arena;
+    ~ArenaResetGuard() {
+      if (arena) {
+        arena->Reset();
+      }
+    }
+  } reset_guard{arena};
 
   // There's a decent amount of overhead in creating a dictionary, even if it's
   // completely empty. So don't set a dictionary unless it's non-empty.
   DictionaryPointer dictionary(nullptr, nullptr);
   if (font_base.size() > 0) {
     dictionary =
-        SharedBrotliEncoder::CreateDictionary(font_base.span(), &arena_);
+        SharedBrotliEncoder::CreateDictionary(font_base.span(), arena);
     if (!dictionary) {
       return absl::InternalError("Failed to create the shared dictionary.");
     }
@@ -67,7 +79,7 @@ Status BrotliBinaryDiff::Diff(const FontData& font_base, string_view data,
   // Don't give the encoder an estimated size if this is not all the data.
   unsigned data_size = !stream_offset && is_last ? data.size() : 0;
   EncoderStatePointer state = SharedBrotliEncoder::CreateEncoder(
-      quality_, data_size, stream_offset, dictionary.get(), &arena_);
+      quality_, data_size, stream_offset, dictionary.get(), arena);
   if (!state) {
     return absl::InternalError("Failed to create the encoder.");
   }
