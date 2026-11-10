@@ -35,7 +35,6 @@
 #include "ift/encoder/types.h"
 #include "ift/freq/probability_bound.h"
 #include "ift/freq/probability_calculator.h"
-#include "ift/glyph_keyed_diff.h"
 
 using ift::config::FROM_FREQ_DATA;
 using ift::config::FROM_MERGE_GROUPS;
@@ -656,10 +655,11 @@ Status ClosureGlyphSegmenter::ValidateInput(
 
 static void LogMergeForDisjointConditions(
     const ActivationCondition& condition,
+    const SegmentSet& to_merge,
     std::optional<double> condition_probability = std::nullopt) {
   if (condition_probability.has_value()) {
     VLOG(0) << "  Merging segments "
-            << condition.TriggeringSegments().size() << " segments "
+            << to_merge.size() << " segments "
             << "(probability = " << *condition_probability << ")";
   } else {
     VLOG(0) << "  Merging segments "
@@ -669,13 +669,14 @@ static void LogMergeForDisjointConditions(
 
 static StatusOr<bool> ShouldMergeForDisjointConditions(
     const SegmentationContext& context, const ActivationCondition& condition,
+    const SegmentSet& to_merge,
     double probability_threshold,
     const btree_map<SegmentSet, MergeStrategy>& merge_groups) {
   if (condition.IsExclusive() || condition.IsFallback()) {
     return false;
   }
   if (merge_groups.empty()) {
-    LogMergeForDisjointConditions(condition);
+    LogMergeForDisjointConditions(condition, to_merge);
     return true;
   }
 
@@ -692,7 +693,7 @@ static StatusOr<bool> ShouldMergeForDisjointConditions(
 
   if (!matching_strategy->UseCosts() ||
       matching_strategy->ProbabilityProfiles().empty()) {
-    LogMergeForDisjointConditions(condition);
+    LogMergeForDisjointConditions(condition, to_merge);
     return true;
   }
 
@@ -705,7 +706,7 @@ static StatusOr<bool> ShouldMergeForDisjointConditions(
   double avg_prob =
       total_prob / (double)matching_strategy->ProbabilityProfiles().size();
   if (probability_threshold <= 0.0 || avg_prob > probability_threshold) {
-    LogMergeForDisjointConditions(condition, avg_prob);
+    LogMergeForDisjointConditions(condition, to_merge, avg_prob);
     return true;
   }
   return false;
@@ -724,26 +725,28 @@ static StatusOr<GlyphPartition> PartitionInteractingSegments(
   size_t skipped_conditions = 0;
   GlyphSet skipped_glyphs;
   GlyphPartition segment_partition(num_segments);
-  for (const auto& condition : context.glyph_groupings.OrderedConditions()) {
-    SegmentSet triggering = condition.TriggeringSegments();
-    if (condition.IsExclusive() || condition.IsFallback() || triggering.size() <= 1) {
+  for (const auto& [condition, segments_glyphs] :
+       context.InteractingSegmentsAndGlyphs()) {
+
+    const SegmentSet& segments = segments_glyphs.first;
+    const GlyphSet& glyphs = segments_glyphs.second;
+    if (condition.IsFallback() || segments.size() <= 1) {
       continue;
     }
 
-    if (TRY(segment_partition.InSameGroup(triggering))) {
+    if (TRY(segment_partition.InSameGroup(segments))) {
       // These segments are already planned to be merged.
       continue;
     }
 
     if (!TRY(ShouldMergeForDisjointConditions(
-            context, condition, probability_threshold, merge_groups))) {
+            context, condition, segments, probability_threshold, merge_groups))) {
       skipped_conditions++;
-      skipped_glyphs.union_set(
-          context.glyph_groupings.ConditionsAndGlyphs().at(condition));
+      skipped_glyphs.union_set(glyphs);
       continue;
     }
 
-    TRYV(segment_partition.Union(triggering));
+    TRYV(segment_partition.Union(segments));
   }
 
   VLOG(0) << "  Skipped merging for " << skipped_conditions
