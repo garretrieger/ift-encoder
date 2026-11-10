@@ -411,13 +411,13 @@ static Status GroupInteractingScripts(
   GlyphPartition ungrouped_partition(ungrouped_list.size());
   flat_hash_map<uint32_t, IntSet> ungrouped_to_scripts;
 
-  for (const auto& [gid, condition] : dependency_closure->AllGlyphConditions()) {
-    if (condition.IsUnitary()) {
+  for (const auto& [gid, segments] : dependency_closure->AllGlyphInteractingSegments()) {
+    if (segments.size() <= 1) {
       continue;
     }
 
     GlyphSet triggering;
-    triggering.union_set(condition.TriggeringSegments());
+    triggering.union_set(segments);
     if (triggering.size() <= 1) {
       continue;
     }
@@ -439,7 +439,7 @@ static Status GroupInteractingScripts(
           LOG(INFO) << "Grouping " << scripts[first] << " and "
                     << scripts[other]
                     << " together due to glyph condition interaction on g"
-                    << gid << ": " << condition.ToString();
+                    << gid << ": segments " << segments.ToString();
           TRYV(partition.Union(first, other));
         }
       }
