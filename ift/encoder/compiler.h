@@ -2,12 +2,14 @@
 #define IFT_ENCODER_COMPILER_H_
 
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "hb-subset.h"
@@ -177,6 +179,17 @@ class Compiler {
     }
     init_subset_ = init_subset;
     return absl::OkStatus();
+  }
+
+  /*
+   * Configures the explicit set of glyph outlines to include in the initial
+   * font's glyph-keyed tables (glyf/loca, gvar, CFF, CFF2) in mixed mode,
+   * without layout or cmap closure. When unset, mixed mode falls back to the
+   * glyph closure of the initial subset definition.
+   */
+  absl::Status SetInitGlyphs(const ift::common::GlyphSet& init_glyphs);
+  const std::optional<ift::common::GlyphSet>& init_glyphs() const {
+    return init_glyphs_;
   }
 
   struct Jump {
@@ -369,6 +382,11 @@ class Compiler {
       const ProcessingContext& context, hb_face_t* font,
       const SubsetDefinition& def) const;
 
+  absl::StatusOr<ift::common::hb_face_unique_ptr> CutOutlineSubsetFaceBuilder(
+      const ProcessingContext& context, hb_face_t* font,
+      const ift::common::GlyphSet& gids,
+      const design_space_t& design_space) const;
+
   absl::StatusOr<ift::common::FontData> GenerateBaseGvar(
       const ProcessingContext& context, hb_face_t* font,
       const design_space_t& design_space) const;
@@ -415,11 +433,15 @@ class Compiler {
       const ProcessingContext& context,
       const SubsetDefinition& node_subset) const;
 
+  absl::Status ValidateGlyphsInFace(const ift::common::IntSet& gids,
+                                    absl::string_view label) const;
+
   ift::common::hb_face_unique_ptr face_;
   absl::btree_map<uint32_t, ift::common::IntSet> glyph_data_patches_;
   std::vector<proto::PatchMap::Entry> glyph_patch_conditions_;
 
   SubsetDefinition init_subset_;
+  std::optional<ift::common::GlyphSet> init_glyphs_;
   std::vector<SubsetDefinition> extension_subsets_;
   uint32_t jump_ahead_ = 1;
   uint32_t max_depth_ = 0;

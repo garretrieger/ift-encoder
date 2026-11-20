@@ -189,9 +189,14 @@ cc_test(
     srcs = [
         "config_compiler_test.cc",
     ],
+    data = [
+        "//ift/common:testdata",
+    ],
     deps = [
         ":config_compiler",
         ":segmentation_plan_cc_proto",
+        "//ift/common",
+        "//ift/common:test_font_loader",
         "//ift/encoder",
         "@googletest//:gtest",
         "@googletest//:gtest_main",

@@ -96,6 +96,13 @@ class IntegrationTest : public ::testing::Test {
     roboto_vf_ =
         loader->LoadFontData("ift/common/testdata/Roboto[wdth,wght].ttf")
             .value();
+
+    roboto_regular_ =
+        loader->LoadFontData("ift/common/testdata/Roboto-Regular.ttf").value();
+
+    noto_sans_jp_cff2_liga_ =
+        loader->LoadFontData("ift/common/testdata/NotoSansJP-VF.liga.otf")
+            .value();
   }
 
   StatusOr<GlyphSet> InitEncoderForMixedMode(Compiler& compiler) {
@@ -232,6 +239,8 @@ class IntegrationTest : public ::testing::Test {
   FontData feature_test_;
 
   FontData roboto_vf_;
+  FontData roboto_regular_;
+  FontData noto_sans_jp_cff2_liga_;
 
   uint32_t chunk0_cp = 0x47;
   uint32_t chunk1_cp = 0xb7;
@@ -1852,6 +1861,266 @@ TEST_F(IntegrationTest, UrlTemplateOverride) {
   }
   EXPECT_TRUE(found_tk);
   EXPECT_TRUE(found_gk);
+}
+
+static Status AddConjunctiveCharPairCondition(Compiler& compiler, uint32_t cp_a,
+                                              uint32_t cp_b, uint32_t patch_id,
+                                              uint32_t base_entry_index = 0) {
+  PatchMap::Entry a_entry({cp_a}, 0, PatchEncoding::GLYPH_KEYED);
+  a_entry.ignored = true;
+  TRYV(compiler.AddGlyphDataPatchCondition(a_entry));
+
+  PatchMap::Entry b_entry({cp_b}, 0, PatchEncoding::GLYPH_KEYED);
+  b_entry.ignored = true;
+  TRYV(compiler.AddGlyphDataPatchCondition(b_entry));
+
+  PatchMap::Entry and_entry;
+  and_entry.encoding = PatchEncoding::GLYPH_KEYED;
+  and_entry.coverage.conjunctive = true;
+  and_entry.coverage.child_indices = {base_entry_index, base_entry_index + 1};
+  and_entry.patch_indices = {patch_id};
+  return compiler.AddGlyphDataPatchCondition(and_entry);
+}
+
+TEST_F(IntegrationTest, MixedMode_SeparateInitGlyphs_Glyf) {
+  // In Roboto-Regular.ttf: 'f' = 74, 'i' = 77, 'fi' = 444, 'l' = 80, 'fl' = 445
+  Compiler compiler;
+  auto orig_face = roboto_regular_.face();
+  compiler.SetFace(orig_face.get());
+
+  ASSERT_TRUE(compiler.SetInitSubset(IntSet{'f', 'i'}).ok());
+  ASSERT_TRUE(compiler.SetInitGlyphs(GlyphSet{0, 74, 77}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(1, {444}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(2, {80, 445}).ok());
+  ASSERT_TRUE(AddConjunctiveCharPairCondition(compiler, 'f', 'i', 1).ok());
+  ASSERT_TRUE(compiler
+                  .AddGlyphDataPatchCondition(
+                      PatchMap::Entry({'l'}, 2, PatchEncoding::GLYPH_KEYED))
+                  .ok());
+  compiler.AddNonGlyphDataSegment(IntSet{'l'});
+
+  auto encoding = compiler.Compile();
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+  auto encoded_face = encoding->init_font.face();
+
+  EXPECT_FALSE(FontHelper::GlyfData(encoded_face.get(), 74)->empty());
+  EXPECT_FALSE(FontHelper::GlyfData(encoded_face.get(), 77)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(encoded_face.get(), 444)->empty());
+
+  // Extending to 'f' alone requires 0 patches; initial font glyphs were
+  // round-tripped through WOFF2 when building the root node.
+  auto woff2_orig = Compiler::RoundTripWoff2(roboto_regular_.str(), false);
+  ASSERT_TRUE(woff2_orig.ok()) << woff2_orig.status();
+  auto woff2_orig_face = woff2_orig->face();
+  btree_set<std::string> fetched_uris;
+  auto extended_f =
+      ExtendWithDesignSpace(*encoding, {'f'}, {}, {}, &fetched_uris, 1, 0);
+  ASSERT_TRUE(extended_f.ok()) << extended_f.status();
+  EXPECT_TRUE(fetched_uris.empty());
+  auto extended_f_face = extended_f->face();
+  EXPECT_TRUE(
+      GlyphDataMatches(woff2_orig_face.get(), extended_f_face.get(), 'f'));
+  EXPECT_TRUE(FontHelper::GlyfData(extended_f_face.get(), 444)->empty());
+
+  // Extending to 'i' alone also requires 0 patches and leaves 'fi' empty.
+  fetched_uris.clear();
+  auto extended_i =
+      ExtendWithDesignSpace(*encoding, {'i'}, {}, {}, &fetched_uris, 1, 0);
+  ASSERT_TRUE(extended_i.ok()) << extended_i.status();
+  EXPECT_TRUE(fetched_uris.empty());
+  auto extended_i_face = extended_i->face();
+  EXPECT_TRUE(
+      GlyphDataMatches(woff2_orig_face.get(), extended_i_face.get(), 'i'));
+  EXPECT_TRUE(FontHelper::GlyfData(extended_i_face.get(), 444)->empty());
+
+  // Extending to {'f', 'i'} fetches only the 1 glyph-keyed patch for 'fi'.
+  fetched_uris.clear();
+  auto extended_fi =
+      ExtendWithDesignSpace(*encoding, {'f', 'i'}, {}, {}, &fetched_uris, 1, 1);
+  ASSERT_TRUE(extended_fi.ok()) << extended_fi.status();
+  ASSERT_EQ(fetched_uris.size(), 1);
+  EXPECT_NE(fetched_uris.begin()->find(".ift_gk"), std::string::npos);
+
+  auto extended_fi_face = extended_fi->face();
+  EXPECT_EQ(*FontHelper::GlyfData(extended_fi_face.get(), 444),
+            *FontHelper::GlyfData(orig_face.get(), 444));
+}
+
+TEST_F(IntegrationTest, MixedMode_SeparateInitGlyphs_Gvar) {
+  // In Roboto[wdth,wght].ttf: 'f' = 74, 'i' = 77, 'fi' = 471, 'l' = 80, 'fl' =
+  // 472
+  Compiler compiler;
+  auto orig_face = roboto_vf_.face();
+  compiler.SetFace(orig_face.get());
+
+  SubsetDefinition base_def{'f', 'i'};
+  base_def.design_space[kWdth] = AxisRange::Point(100.0f);
+  ASSERT_TRUE(compiler.SetInitSubsetFromDef(base_def).ok());
+  ASSERT_TRUE(compiler.SetInitGlyphs(GlyphSet{0, 74, 77}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(1, {471}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(2, {80, 472}).ok());
+  ASSERT_TRUE(AddConjunctiveCharPairCondition(compiler, 'f', 'i', 1).ok());
+  ASSERT_TRUE(compiler
+                  .AddGlyphDataPatchCondition(
+                      PatchMap::Entry({'l'}, 2, PatchEncoding::GLYPH_KEYED))
+                  .ok());
+  compiler.AddNonGlyphDataSegment(IntSet{'l'});
+  compiler.AddDesignSpaceSegment({{kWdth, *AxisRange::Range(75.0f, 100.0f)}});
+
+  auto encoding = compiler.Compile();
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+  auto encoded_face = encoding->init_font.face();
+
+  EXPECT_FALSE(FontHelper::GlyfData(encoded_face.get(), 74)->empty());
+  EXPECT_FALSE(FontHelper::GvarData(encoded_face.get(), 74)->empty());
+  EXPECT_FALSE(FontHelper::GlyfData(encoded_face.get(), 77)->empty());
+  EXPECT_FALSE(FontHelper::GvarData(encoded_face.get(), 77)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(encoded_face.get(), 471)->empty());
+  EXPECT_TRUE(FontHelper::GvarData(encoded_face.get(), 471)->empty());
+
+  // Extending to 'f' within initial design space needs 0 patches.
+  btree_set<std::string> fetched_uris;
+  auto extended_f = ExtendWithDesignSpace(*encoding, {'f'}, {},
+                                          {{kWght, AxisRange::Point(700.0f)}},
+                                          &fetched_uris, 1, 0);
+  ASSERT_TRUE(extended_f.ok()) << extended_f.status();
+  EXPECT_TRUE(fetched_uris.empty());
+  auto extended_f_face = extended_f->face();
+  EXPECT_FALSE(FontHelper::GlyfData(extended_f_face.get(), 74)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(extended_f_face.get(), 471)->empty());
+
+  // Expanding wdth design space on 'f' alone fetches only the table-keyed
+  // patch replacing gvar, and the replacement base gvar still excludes 'fi'.
+  fetched_uris.clear();
+  auto extended_wdth = ExtendWithDesignSpace(*encoding, {'f'}, {},
+                                             {{kWdth, AxisRange::Point(80.0f)}},
+                                             &fetched_uris, 1, 1);
+  ASSERT_TRUE(extended_wdth.ok()) << extended_wdth.status();
+  ASSERT_EQ(fetched_uris.size(), 1);
+  EXPECT_NE(fetched_uris.begin()->find(".ift_tk"), std::string::npos);
+  auto extended_wdth_face = extended_wdth->face();
+  EXPECT_FALSE(FontHelper::GvarData(extended_wdth_face.get(), 74)->empty());
+  EXPECT_FALSE(FontHelper::GvarData(extended_wdth_face.get(), 77)->empty());
+  EXPECT_TRUE(FontHelper::GvarData(extended_wdth_face.get(), 471)->empty());
+
+  // Extending that font to {'f', 'i'} + wdth=80 loads the glyph-keyed 'fi'
+  // patch for the expanded design space.
+  encoding->init_font.shallow_copy(*extended_wdth);
+  fetched_uris.clear();
+  auto extended_fi = ExtendWithDesignSpace(*encoding, {'f', 'i'}, {},
+                                           {{kWdth, AxisRange::Point(80.0f)}},
+                                           &fetched_uris, 1, 1);
+  ASSERT_TRUE(extended_fi.ok()) << extended_fi.status();
+  ASSERT_EQ(fetched_uris.size(), 1);
+  EXPECT_NE(fetched_uris.begin()->find(".ift_gk"), std::string::npos);
+  auto extended_fi_face = extended_fi->face();
+  EXPECT_EQ(*FontHelper::GlyfData(extended_fi_face.get(), 471),
+            *FontHelper::GlyfData(orig_face.get(), 471));
+  EXPECT_FALSE(FontHelper::GvarData(extended_fi_face.get(), 471)->empty());
+}
+
+TEST_F(IntegrationTest, MixedMode_SeparateInitGlyphs_Cff) {
+  // In NotoSansJP-Regular.otf: 'f' = 71, 'i' = 74, 'fi' = 15192, 'l' = 77, 'fl'
+  // = 15193
+  Compiler compiler;
+  auto orig_face = noto_sans_jp_cff_.face();
+  uint32_t gid_count = hb_face_get_glyph_count(orig_face.get());
+  compiler.SetFace(orig_face.get());
+
+  ASSERT_TRUE(compiler.SetInitSubset(IntSet{'f', 'i'}).ok());
+  ASSERT_TRUE(compiler.SetInitGlyphs(GlyphSet{0, 71, 74}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(1, {15192}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(2, {77, 15193}).ok());
+  ASSERT_TRUE(AddConjunctiveCharPairCondition(compiler, 'f', 'i', 1).ok());
+  ASSERT_TRUE(compiler
+                  .AddGlyphDataPatchCondition(
+                      PatchMap::Entry({'l'}, 2, PatchEncoding::GLYPH_KEYED))
+                  .ok());
+  compiler.AddNonGlyphDataSegment(IntSet{'l'});
+
+  auto encoding = compiler.Compile();
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+  auto encoded_face = encoding->init_font.face();
+
+  EXPECT_GT(FontHelper::CffData(encoded_face.get(), 71).size(), 1);
+  EXPECT_GT(FontHelper::CffData(encoded_face.get(), 74).size(), 1);
+  EXPECT_EQ(FontHelper::CffData(encoded_face.get(), 15192).size(), 1);
+  EXPECT_EQ(FontHelper::CffData(encoded_face.get(), gid_count - 1).size(), 1);
+
+  btree_set<std::string> fetched_uris;
+  auto extended_f =
+      ExtendWithDesignSpace(*encoding, {'f'}, {}, {}, &fetched_uris, 1, 0);
+  ASSERT_TRUE(extended_f.ok()) << extended_f.status();
+  EXPECT_TRUE(fetched_uris.empty());
+  auto extended_f_face = extended_f->face();
+  EXPECT_GT(FontHelper::CffData(extended_f_face.get(), 71).size(), 1);
+  EXPECT_EQ(FontHelper::CffData(extended_f_face.get(), 15192).size(), 1);
+
+  fetched_uris.clear();
+  auto extended_fi =
+      ExtendWithDesignSpace(*encoding, {'f', 'i'}, {}, {}, &fetched_uris, 1, 1);
+  ASSERT_TRUE(extended_fi.ok()) << extended_fi.status();
+  ASSERT_EQ(fetched_uris.size(), 1);
+  EXPECT_NE(fetched_uris.begin()->find(".ift_gk"), std::string::npos);
+
+  auto desubroutinized = desubroutinize(orig_face.get());
+  ASSERT_TRUE(desubroutinized.ok()) << desubroutinized.status();
+  auto desubroutinized_face = desubroutinized->face();
+  auto extended_fi_face = extended_fi->face();
+  EXPECT_EQ(FontHelper::CffData(extended_fi_face.get(), 15192).span(),
+            FontHelper::CffData(desubroutinized_face.get(), 15192).span());
+}
+
+TEST_F(IntegrationTest, MixedMode_SeparateInitGlyphs_Cff2) {
+  // In NotoSansJP-VF.liga.otf: 'f' = 1, 'i' = 2, 'fi' = 3, 'Z' = 4 (last gid)
+  Compiler compiler;
+  auto orig_face = noto_sans_jp_cff2_liga_.face();
+  compiler.SetFace(orig_face.get());
+
+  ASSERT_TRUE(compiler.SetInitSubset(IntSet{'f', 'i'}).ok());
+  ASSERT_TRUE(compiler.SetInitGlyphs(GlyphSet{0, 1, 2}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(1, {3}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(2, {4}).ok());
+  ASSERT_TRUE(AddConjunctiveCharPairCondition(compiler, 'f', 'i', 1).ok());
+  ASSERT_TRUE(compiler
+                  .AddGlyphDataPatchCondition(
+                      PatchMap::Entry({'Z'}, 2, PatchEncoding::GLYPH_KEYED))
+                  .ok());
+  compiler.AddNonGlyphDataSegment(IntSet{'Z'});
+
+  auto encoding = compiler.Compile();
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+  auto encoded_face = encoding->init_font.face();
+
+  EXPECT_EQ(FontHelper::ToCodepointsSet(encoded_face.get()),
+            (IntSet{'f', 'i'}));
+  EXPECT_FALSE(FontHelper::Cff2Data(encoded_face.get(), 1).empty());
+  EXPECT_FALSE(FontHelper::Cff2Data(encoded_face.get(), 2).empty());
+  EXPECT_TRUE(FontHelper::Cff2Data(encoded_face.get(), 3).empty());
+  EXPECT_TRUE(FontHelper::Cff2Data(encoded_face.get(), 4).empty());
+
+  btree_set<std::string> fetched_uris;
+  auto extended_f =
+      ExtendWithDesignSpace(*encoding, {'f'}, {}, {}, &fetched_uris, 1, 0);
+  ASSERT_TRUE(extended_f.ok()) << extended_f.status();
+  EXPECT_TRUE(fetched_uris.empty());
+  auto extended_f_face = extended_f->face();
+  EXPECT_FALSE(FontHelper::Cff2Data(extended_f_face.get(), 1).empty());
+  EXPECT_TRUE(FontHelper::Cff2Data(extended_f_face.get(), 3).empty());
+
+  fetched_uris.clear();
+  auto extended_fi =
+      ExtendWithDesignSpace(*encoding, {'f', 'i'}, {}, {}, &fetched_uris, 1, 1);
+  ASSERT_TRUE(extended_fi.ok()) << extended_fi.status();
+  ASSERT_EQ(fetched_uris.size(), 1);
+  EXPECT_NE(fetched_uris.begin()->find(".ift_gk"), std::string::npos);
+
+  auto desubroutinized = desubroutinize(orig_face.get());
+  ASSERT_TRUE(desubroutinized.ok()) << desubroutinized.status();
+  auto desubroutinized_face = desubroutinized->face();
+  auto extended_fi_face = extended_fi->face();
+  EXPECT_EQ(FontHelper::Cff2Data(extended_fi_face.get(), 3).span(),
+            FontHelper::Cff2Data(desubroutinized_face.get(), 3).span());
 }
 
 }  // namespace ift
