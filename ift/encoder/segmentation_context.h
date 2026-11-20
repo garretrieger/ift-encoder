@@ -258,11 +258,6 @@ class SegmentationContext {
     return dependency_closure_->SegmentsMerged(base_segment, segments);
   }
 
-  /*
-   * Invalidates all grouping information and fully reprocesses all segments.
-   */
-  absl::Status ReassignInitSubset(SubsetDefinition new_def);
-
   // Moves `glyphs` into the initial font without closure expansion or
   // updating DependencyClosure, and removes them from `glyph_condition_set`
   // and `glyph_groupings`.
@@ -273,6 +268,14 @@ class SegmentationContext {
   void AddToInitFontSegment(const SubsetDefinition& def) {
     segmentation_info_->AddToInitFontSegment(def);
   }
+
+  // Promotes segments from `eligible_segments` into the initial font's
+  // table-keyed sets when they appear in at least one moved initial-font glyph
+  // condition and have no remaining patch satisfied by that segment alone.
+  // Clears any segment whose definition is now contained in the initial font
+  // and no longer triggers any remaining patches.
+  void PromoteInitFontSegments(
+      const ift::common::SegmentSet& eligible_segments);
 
   // Clears segments in `unused_segments` from `SegmentationInfo()` and
   // `inert_segments_`.
@@ -340,6 +343,9 @@ class SegmentationContext {
   }
 
   void TransferDependencyGraphGlyphConditions(const common::GlyphSet& gids);
+
+  bool IsSegmentInert(segment_index_t s) const;
+  void RefreshInertSegments();
 
   /*
    * Ensures that the produce segmentation is:

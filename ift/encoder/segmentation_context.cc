@@ -244,7 +244,14 @@ Status SegmentationContext::ReprocessChanged(InvalidationSet modified) {
   modified.glyphs.union_set(affected);
   TransferDependencyGraphGlyphConditions(modified.glyphs);
 
-  return GroupGlyphs(modified.glyphs, modified.segments);
+  TRYV(GroupGlyphs(modified.glyphs, modified.segments));
+  inert_segments_.subtract(modified.segments);
+  if (IsSegmentInert(modified.base_segment)) {
+    inert_segments_.insert(modified.base_segment);
+  } else {
+    inert_segments_.erase(modified.base_segment);
+  }
+  return absl::OkStatus();
 }
 
 Status SegmentationContext::ReprocessAll() {
@@ -252,7 +259,9 @@ Status SegmentationContext::ReprocessAll() {
   // processing.
   TransferDependencyGraphGlyphConditions(InitFontMoveTargetGlyphs());
 
-  return GroupGlyphs(InitFontMoveTargetGlyphs(), {});
+  TRYV(GroupGlyphs(InitFontMoveTargetGlyphs(), {}));
+  RefreshInertSegments();
+  return absl::OkStatus();
 }
 
 Status SegmentationContext::ExcludeEmptyGlyphs() {
@@ -268,7 +277,9 @@ Status SegmentationContext::ExcludeEmptyGlyphs() {
   }
 
   glyph_condition_set.InvalidateGlyphInformation(empty_gids);
-  return GroupGlyphs(empty_gids, {});
+  TRYV(GroupGlyphs(empty_gids, {}));
+  RefreshInertSegments();
+  return absl::OkStatus();
 }
 
 Status SegmentationContext::MoveGlyphsToInitFont(const GlyphSet& glyphs) {
@@ -276,86 +287,89 @@ Status SegmentationContext::MoveGlyphsToInitFont(const GlyphSet& glyphs) {
     return absl::OkStatus();
   }
 
+  SegmentSet affected_segments;
+  for (glyph_id_t gid : glyphs) {
+    auto condition = glyph_groupings.GlyphToCondition(gid);
+    if (condition.has_value()) {
+      affected_segments.union_set(condition->TriggeringSegments());
+    }
+  }
+
   segmentation_info_->MoveGlyphsToInitFont(glyphs);
   RefreshUnicodeRangePatchSizeCaches();
 
   glyph_condition_set.InvalidateGlyphInformation(glyphs);
-  return GroupGlyphs(glyphs, {});
+  TRYV(GroupGlyphs(glyphs, {}));
+
+  for (segment_index_t s : affected_segments) {
+    if (IsSegmentInert(s)) {
+      inert_segments_.insert(s);
+    } else {
+      inert_segments_.erase(s);
+    }
+  }
+  return absl::OkStatus();
 }
 
-/*
- * Invalidates all grouping information and fully reprocesses all segments.
- */
-Status SegmentationContext::ReassignInitSubset(SubsetDefinition new_def) {
-  GlyphConditionSet previous_glyph_condition_set = glyph_condition_set;
+namespace {
 
-  new_def = TRY(glyph_closure_cache->ExpandClosure(new_def));
-  GlyphSet total_removed_gids = InitFontMoveTargetGlyphs();
-  total_removed_gids.intersect(new_def.gids);
-
-  SegmentSet segments_with_changed_defs;
-  uint32_t s_index = 0;
-  for (const auto& s : segmentation_info_->Segments()) {
-    if (s.Definition().codepoints.intersects(new_def.codepoints)) {
-      segments_with_changed_defs.insert(s_index);
+bool IsSatisfiedBySingleSegment(const ActivationCondition& condition,
+                                segment_index_t segment_index) {
+  for (const SegmentSet& clause : condition.conditions()) {
+    if (!clause.contains(segment_index)) {
+      return false;
     }
-    for (hb_tag_t f : s.Definition().feature_tags) {
-      if (new_def.feature_tags.contains(f)) {
-        segments_with_changed_defs.insert(s_index);
+  }
+  return !condition.conditions().empty();
+}
+
+}  // namespace
+
+void SegmentationContext::PromoteInitFontSegments(
+    const SegmentSet& eligible_segments) {
+  SegmentSet segments_in_moved_glyphs;
+  const auto& all_glyph_conditions = dependency_closure_->AllGlyphConditions();
+  for (glyph_id_t gid : segmentation_info_->InitFont().GlyphKeyedGlyphs()) {
+    auto it = all_glyph_conditions.find(gid);
+    if (it != all_glyph_conditions.end()) {
+      segments_in_moved_glyphs.union_set(it->second.TriggeringSegments());
+    }
+  }
+
+  SegmentSet candidates = eligible_segments;
+  candidates.intersect(segments_in_moved_glyphs);
+
+  const auto& segments = segmentation_info_->Segments();
+  for (segment_index_t s : candidates) {
+    const SubsetDefinition& seg_def = segments.at(s).Definition();
+    if (seg_def.Empty()) {
+      continue;
+    }
+    bool has_single_segment_patch = false;
+    for (const ActivationCondition& c :
+         glyph_groupings.TriggeringSegmentToConditions(s)) {
+      if (IsSatisfiedBySingleSegment(c, s)) {
+        has_single_segment_patch = true;
         break;
       }
     }
-    s_index++;
-  }
-
-  SubsetDefinition new_def_delta = new_def;
-  new_def_delta.Subtract(SegmentationInfo().InitFont().ClosedInputDefinition());
-  SegmentSet segments_to_reprocess =
-      TRY(dependency_closure_->SegmentsThatInteractWith(new_def_delta));
-
-  TRYV(segmentation_info_->ReassignInitSubset(*glyph_closure_cache, new_def));
-  // Dep closure doesn't need the expanded affected set, as it will traverse
-  // from the input segments to find the affected subgraph.
-  TRYV(dependency_closure_->InitFontChanged(segments_with_changed_defs));
-
-  GlyphSet always_true_glyphs = dependency_closure_->AlwaysTrueGlyphs();
-  always_true_glyphs.intersect(TargetGlyphs());
-  if (!always_true_glyphs.empty()) {
-    VLOG(0) << "Moving " << always_true_glyphs.size()
-            << " always-true glyphs into the initial font.";
-    segmentation_info_->MoveGlyphsToInitFont(always_true_glyphs);
-    total_removed_gids.union_set(always_true_glyphs);
-  }
-
-  RefreshUnicodeRangePatchSizeCaches();
-
-  // All segments depend on the init subset def, so we must reprocess
-  // everything. First reset condition set information:
-  glyph_condition_set.InvalidateGlyphInformation(total_removed_gids);
-  glyph_condition_set.InvalidateGlyphInformation(segments_to_reprocess);
-  inert_segments_.subtract(segments_to_reprocess);
-
-  // Then reprocess segments:
-  GlyphSet gids;
-  for (segment_index_t s : segments_to_reprocess) {
-    gids.union_set(dependency_closure_->SegmentsToAffectedGlyphs({s}));
-  }
-  gids.intersect(InitFontMoveTargetGlyphs());
-  TransferDependencyGraphGlyphConditions(gids);
-
-  // the groupings can be incrementally recomputed by looking at what conditions
-  // have changed.
-  GlyphSet changed_gids = std::move(total_removed_gids);
-  for (glyph_id_t gid : InitFontMoveTargetGlyphs()) {
-    const auto& new_conditions = glyph_condition_set.ConditionsFor(gid);
-    if (previous_glyph_condition_set.ConditionsFor(gid) != new_conditions) {
-      changed_gids.insert(gid);
+    if (!has_single_segment_patch) {
+      AddToInitFontSegment(seg_def);
     }
   }
 
-  TRYV(GroupGlyphs(changed_gids, segments_with_changed_defs));
-
-  return absl::OkStatus();
+  SegmentSet unused_segments;
+  for (segment_index_t s = 0; s < segments.size(); ++s) {
+    const SubsetDefinition& seg_def = segments.at(s).Definition();
+    if (!seg_def.Empty() &&
+        segmentation_info_->InitFont().ContainsSegment(seg_def) &&
+        glyph_groupings.TriggeringSegmentToConditions(s).empty()) {
+      unused_segments.insert(s);
+    }
+  }
+  if (!unused_segments.empty()) {
+    ClearUnusedInitSegments(unused_segments);
+  }
 }
 
 Status SegmentationContext::ResetSegments(std::vector<Segment> segments) {
@@ -428,7 +442,28 @@ void SegmentationContext::TransferDependencyGraphGlyphConditions(
     }
     glyph_condition_set.SetCondition(g, condition);
   }
-  inert_segments_ = dependency_closure_->InertSegments();
+}
+
+bool SegmentationContext::IsSegmentInert(segment_index_t s) const {
+  if (segmentation_info_->Segments().at(s).Definition().Empty()) {
+    return false;
+  }
+  for (const auto& c : glyph_groupings.TriggeringSegmentToConditions(s)) {
+    if (!c.IsUnitary()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void SegmentationContext::RefreshInertSegments() {
+  SegmentSet candidates = segmentation_info_->NonEmptySegments();
+  for (const auto& [condition, _] : glyph_groupings.ConditionsAndGlyphs()) {
+    if (!condition.IsUnitary()) {
+      candidates.subtract(condition.TriggeringSegments());
+    }
+  }
+  inert_segments_ = std::move(candidates);
 }
 
 }  // namespace ift::encoder

@@ -285,6 +285,19 @@ TEST_F(RequestedSegmentationInformationTest,
   EXPECT_EQ(init_font.UnsegmentedDefinition(),
             init_font.ClosedInputDefinition());
 
+  EXPECT_TRUE(init_font.ContainsSegment({'a'}));
+  EXPECT_TRUE(init_font.ContainsSegment(smcp));
+  SubsetDefinition a_with_gid({'a'});
+  a_with_gid.gids.insert(69);
+  EXPECT_TRUE(init_font.ContainsSegment(a_with_gid));
+  EXPECT_FALSE(init_font.ContainsSegment({'i'}));
+  SubsetDefinition dlig;
+  dlig.feature_tags.insert(HB_TAG('d', 'l', 'i', 'g'));
+  EXPECT_FALSE(init_font.ContainsSegment(dlig));
+  SubsetDefinition a_with_unmoved_gid({'a'});
+  a_with_unmoved_gid.gids.insert(77);
+  EXPECT_FALSE(init_font.ContainsSegment(a_with_unmoved_gid));
+
   // Clearing s0 ('a') moves its definition into UnsegmentedDefinition and drops
   // it from the segment map while leaving active segment s1 ('f') intact.
   info->ClearUnusedInitSegments({0});

@@ -806,6 +806,7 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
   // moved to the initial font (eg. cases where the probability of a patch is
   // ~1.0). Do this only for strategies that have opted in.
   bool init_font_changed = false;
+  SegmentSet eligible_init_segments;
   for (Merger& merger : mergers) {
     if (!merger.Strategy().UseCosts() ||
         !merger.Strategy().HasInitFontMerge()) {
@@ -817,7 +818,7 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
       if (profile.init_font_merge_threshold.has_value()) {
         init_font_changed = true;
         TRYV(merger.ReassignInitSubset());
-        TRYV(merger.MoveSegmentsToInitFont(p));
+        eligible_init_segments.union_set(TRY(merger.MoveSegmentsToInitFont(p)));
       }
     }
   }
@@ -826,11 +827,19 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
     TRYV(context.ExcludeEmptyGlyphs());
   }
 
+  if (init_font_changed) {
+    context.PromoteInitFontSegments(eligible_init_segments);
+    VLOG(0) << "Initial font now has "
+            << context.SegmentationInfo().InitFontSegment().codepoints.size()
+            << " codepoints and "
+            << context.SegmentationInfo().InitFontGlyphs().size() << " glyphs";
+  }
+
   if (init_font_changed || has_init_font_merge) {
     for (Merger& merger : mergers) {
-      // Any init font moves or empty-glyph exclusions above can cause segment
-      // or exclusive patch changes that affect other mergers, recompute the
-      // candidate segments and caches for all mergers.
+      // Any init font moves, empty-glyph exclusions, or promoted segments above
+      // can cause segment or exclusive patch changes that affect other
+      // mergers, recompute the candidate segments and caches for all mergers.
       TRYV(merger.ReassignInitSubset());
     }
   }
