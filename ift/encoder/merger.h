@@ -58,20 +58,15 @@ class Merger {
   absl::StatusOr<std::optional<InvalidationSet>> TryNextMerge();
 
   /*
-   * This method analyzes the segments and checks to see if any should be
-   * moved into the initial font.
+   * Analyzes patches whose triggering segments pass the probability threshold
+   * for `profile_index` and moves those whose cost delta is below the
+   * configure threshold into the initial font's glyph-keyed glyph set.
    *
-   * The common example where this is useful is for segments that have 100%
-   * probability. Since these are always needed, the most efficient thing to
-   * do is to move them into the initial font so they are already loaded
-   * without needing to be part of a patch.
-   *
-   * The approach is fairly straightforward: iterate through all of the
-   * conditions/patches and compute a cost delta for moving that patch
-   * into the init font. Move only those cases whose delta is below a
-   * configurable threshold.
+   * Returns the set of segments that passed the profile's probability
+   * threshold.
    */
-  absl::Status MoveSegmentsToInitFont(size_t profile_index = 0);
+  absl::StatusOr<ift::common::SegmentSet> MoveSegmentsToInitFont(
+      size_t profile_index = 0);
 
   /*
    * Recompute the state of this merger to respect changes made to the

@@ -887,14 +887,12 @@ TEST_F(CandidateMergeTest, ComputeInitFontCostDelta) {
       *context->patch_size_cache_for_init_font->GetPatchSize({0, g_a, g_b});
   uint32_t plus_f_size =
       *context->patch_size_cache_for_init_font->GetPatchSize({0, g_a, g_f});
-  uint32_t plus_f_i_fi_ffi_size =
+  uint32_t plus_f_i_size =
       *context->patch_size_cache_for_init_font->GetPatchSize(
-          {0, g_a, g_f, g_i, g_fi, g_ffi});
+          {0, g_a, g_f, g_i});
   uint32_t plus_fi_ffi_size =
       *context->patch_size_cache_for_init_font->GetPatchSize(
           {0, g_a, g_fi, g_ffi});
-  uint32_t plus_fi_size =
-      *context->patch_size_cache_for_init_font->GetPatchSize({0, g_a, g_fi});
 
   uint32_t b_size =
       *context->patch_size_cache_for_init_font->GetPatchSize({g_b});
@@ -904,90 +902,57 @@ TEST_F(CandidateMergeTest, ComputeInitFontCostDelta) {
       *context->patch_size_cache_for_init_font->GetPatchSize({g_i});
   uint32_t fi_ffi_size =
       *context->patch_size_cache_for_init_font->GetPatchSize({g_fi, g_ffi});
-  uint32_t ffi_size =
-      *context->patch_size_cache_for_init_font->GetPatchSize({g_ffi});
-  uint32_t i_fi_ffi_size =
-      *context->patch_size_cache_for_init_font->GetPatchSize(
-          {g_i, g_fi, g_ffi});
 
-  /* Case 1: simple move */
+  /* Case 1: simple exclusive inert patch move */
   flat_hash_map<GlyphSet, uint32_t> smallest;
-  auto r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, {g_b},
-                                                    smallest);
+  ActivationCondition cond_b = ActivationCondition::exclusive_segment(0, 0);
+  auto best =
+      CandidateMerge::ComputeBestCaseInitFontCostDelta(merger, cond_b, {g_b});
+  ASSERT_TRUE(best.ok()) << best.status();
+  EXPECT_NEAR(*best, 0.5 * b_size - 0.95 * (b_size + 75), 1e-9);
+
+  auto r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, cond_b,
+                                                    {g_b}, smallest);
   ASSERT_TRUE(r.ok()) << r.status();
-  double delta = r->first;
-  GlyphSet moved_glyphs = r->second;
+  EXPECT_NEAR(*r, (plus_b_size - init_size) - 0.95 * (b_size + 75), 1e-9);
 
-  EXPECT_EQ(delta,
-            // patch with b removed and moved to the init font.
-            (plus_b_size - init_size) - 0.95 * (b_size + 75));
-  EXPECT_EQ(moved_glyphs, (GlyphSet{g_b}));
-
-  /* Case 2: move + modified conditions (one half of (f AND i) moved) */
+  /* Case 2: exclusive non-inert patch move does not affect other patches */
   smallest.clear();
-  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, {g_f},
+  ActivationCondition cond_f = ActivationCondition::exclusive_segment(1, 0);
+  best =
+      CandidateMerge::ComputeBestCaseInitFontCostDelta(merger, cond_f, {g_f});
+  ASSERT_TRUE(best.ok()) << best.status();
+  EXPECT_NEAR(*best, 0.5 * f_size - 0.85 * (f_size + 75), 1e-9);
+
+  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, cond_f, {g_f},
                                                smallest);
   ASSERT_TRUE(r.ok()) << r.status();
-  delta = r->first;
-  moved_glyphs = r->second;
+  EXPECT_NEAR(*r, (plus_f_size - init_size) - 0.85 * (f_size + 75), 1e-9);
 
-  EXPECT_NEAR(delta,
-              (plus_f_size - init_size)  /* init font increase */
-                  - 0.85 * (f_size + 75) /* if (f) removed */
-                  - 0.75 * (i_size + 75) /* if (i) removed */
-                  -
-                  (0.75 * 0.85) * (fi_ffi_size + 75) /* if (f and i) removed */
-                  + 0.75 * (i_fi_ffi_size + 75) /* if (i) with ligatures */,
-              1e-9);
-  EXPECT_EQ(moved_glyphs, (GlyphSet{g_f}));
-
-  /* Case 3: move non exclusive */
+  /* Case 3: conjunctive non-exclusive patch move */
   smallest.clear();
-  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, {g_fi, g_ffi},
-                                               smallest);
-  ASSERT_TRUE(r.ok()) << r.status();
-  delta = r->first;
-  moved_glyphs = r->second;
-
-  EXPECT_NEAR(delta,
-              (plus_fi_ffi_size - init_size) /* init font increase */
-                  -
-                  (0.85 * 0.75) * (fi_ffi_size + 75), /* if (f and i) removed */
+  ActivationCondition cond_fi = ActivationCondition::and_segments({1, 2}, 0);
+  best = CandidateMerge::ComputeBestCaseInitFontCostDelta(merger, cond_fi,
+                                                          {g_fi, g_ffi});
+  ASSERT_TRUE(best.ok()) << best.status();
+  EXPECT_NEAR(*best, 0.5 * fi_ffi_size - (0.85 * 0.75) * (fi_ffi_size + 75),
               1e-9);
-  EXPECT_EQ(moved_glyphs, (GlyphSet{g_fi, g_ffi}));
 
-  /* Case 4: move part of a patch */
+  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, cond_fi,
+                                               {g_fi, g_ffi}, smallest);
+  ASSERT_TRUE(r.ok()) << r.status();
+  EXPECT_NEAR(
+      *r, (plus_fi_ffi_size - init_size) - (0.85 * 0.75) * (fi_ffi_size + 75),
+      1e-9);
+
+  /* Case 4: incremental move after moving g_f does not closure-expand fi */
+  ASSERT_TRUE(context->MoveGlyphsToInitFont({g_f}).ok());
   smallest.clear();
-  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, {g_fi},
-                                               smallest);
+  ActivationCondition cond_i = ActivationCondition::exclusive_segment(2, 0);
+  r = CandidateMerge::ComputeInitFontCostDelta(merger, plus_f_size, cond_i,
+                                               {g_i}, smallest);
   ASSERT_TRUE(r.ok()) << r.status();
-  delta = r->first;
-  moved_glyphs = r->second;
-
-  EXPECT_NEAR(delta,
-              (plus_fi_size - init_size) /* init font increase */
-                  -
-                  (0.85 * 0.75) * (fi_ffi_size + 75) /* if (f and i) removed */
-                  + (0.85 * 0.75) * (ffi_size + 75), /* if (f and i) added */
-              1e-9);
-  EXPECT_EQ(moved_glyphs, (GlyphSet{g_fi}));
-
-  /* Case 5: move multiple */
-  smallest.clear();
-  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, {g_f, g_i},
-                                               smallest);
-  ASSERT_TRUE(r.ok()) << r.status();
-  delta = r->first;
-  moved_glyphs = r->second;
-
-  EXPECT_NEAR(delta,
-              (plus_f_i_fi_ffi_size - init_size) /* init font increase */
-                  - 0.85 * (f_size + 75)         /* if (f) removed */
-                  - 0.75 * (i_size + 75)         /* if (i) removed */
-                  -
-                  (0.75 * 0.85) * (fi_ffi_size + 75), /* if (f and i) removed */
-              1e-9);
-  EXPECT_EQ(moved_glyphs, (GlyphSet{g_f, g_i, g_fi, g_ffi}));
+  EXPECT_NEAR(*r, (plus_f_i_size - plus_f_size) - 0.75 * (i_size + 75), 1e-9);
 }
 
 TEST_F(CandidateMergeTest, ComputeInitFontCostDelta_TracksSmallestDelta) {
@@ -1028,22 +993,23 @@ TEST_F(CandidateMergeTest, ComputeInitFontCostDelta_TracksSmallestDelta) {
   mock_cache->SetPatchSize({0, g_a}, init_size);
   mock_cache->SetPatchSize({0, g_a, g_b}, 1100);
 
+  ActivationCondition cond_b = ActivationCondition::exclusive_segment(0, 0);
   flat_hash_map<GlyphSet, uint32_t> smallest_size_increases;
 
   // First call: size increase is 100.
-  auto r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, {g_b},
-                                                    smallest_size_increases);
+  auto r = CandidateMerge::ComputeInitFontCostDelta(
+      merger, init_size, cond_b, {g_b}, smallest_size_increases);
   ASSERT_TRUE(r.ok()) << r.status();
-  double first_delta = r->first;
+  double first_delta = *r;
   EXPECT_EQ(smallest_size_increases.at({g_b}), 100);
 
   // Second call: simulated size increase is 200 (1200 - 1000).
   // But it should use the stored smallest increase (100).
   mock_cache->SetPatchSize({0, g_a, g_b}, 1200);
-  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, {g_b},
+  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, cond_b, {g_b},
                                                smallest_size_increases);
   ASSERT_TRUE(r.ok()) << r.status();
-  double second_delta = r->first;
+  double second_delta = *r;
 
   EXPECT_EQ(smallest_size_increases.at({g_b}), 100);
   EXPECT_EQ(first_delta, second_delta);
@@ -1052,10 +1018,10 @@ TEST_F(CandidateMergeTest, ComputeInitFontCostDelta_TracksSmallestDelta) {
   // It should update the stored smallest increase to 50 and return a smaller
   // delta.
   mock_cache->SetPatchSize({0, g_a, g_b}, 1050);
-  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, {g_b},
+  r = CandidateMerge::ComputeInitFontCostDelta(merger, init_size, cond_b, {g_b},
                                                smallest_size_increases);
   ASSERT_TRUE(r.ok()) << r.status();
-  double third_delta = r->first;
+  double third_delta = *r;
 
   EXPECT_EQ(smallest_size_increases.at({g_b}), 50);
 

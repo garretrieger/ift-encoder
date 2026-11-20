@@ -112,8 +112,8 @@ Segments whose exclusive glyphs moved to `InitialFont::glyph_keyed_glyphs_` rema
     * Add `SegmentationContext::{MoveGlyphsToInitFont,AddToInitFontSegment,ClearUnusedInitSegments}`, switch initial `AlwaysTrueGlyphs()` handling to `MoveGlyphsToInitFont`, and emit `InitialFontGlyphClosure()` in `GlyphSegmentation::ToSegmentationPlanProto()`.
     * Add unit tests in `RequestedSegmentationInformationTest` and `ClosureGlyphSegmenterTest`, and update `AlwaysTrueGlyphs_InitialSegmentMovedToInitFont` for `InitialFontSegment().gids` vs `InitialFontGlyphClosure()` / `plan.initial_glyphs()`.
 
-- [ ] **Commit 3: Rework `MoveSegmentsToInitFont` and `CandidateMerge` init-font cost delta to move patches and eligible segments without closure expansion.**
-  * **Files**: `ift/encoder/candidate_merge.{h,cc}`, `ift/encoder/candidate_merge_test.cc`, `ift/encoder/merger.{h,cc}`, `ift/encoder/segmentation_context.{h,cc}`, `ift/encoder/glyph_groupings.{h,cc}`, `ift/encoder/closure_glyph_segmenter.cc`, `ift/encoder/closure_glyph_segmenter_test.cc`.
+- [x] **Commit 3: Rework `MoveSegmentsToInitFont` and `CandidateMerge` init-font cost delta to move patches and eligible segments without closure expansion.**
+  * **Files**: `ift/encoder/initial_font.h`, `ift/encoder/requested_segmentation_information_test.cc`, `ift/encoder/candidate_merge.{h,cc}`, `ift/encoder/candidate_merge_test.cc`, `ift/encoder/merger.{h,cc}`, `ift/encoder/segmentation_context.{h,cc}`, `ift/encoder/closure_glyph_segmenter.cc`, `ift/encoder/closure_glyph_segmenter_test.cc`, `docs/init_font_handling.md`.
   * **Changes**:
     * Simplify `CandidateMerge::ComputeBestCaseInitFontCostDelta` and `CandidateMerge::ComputeInitFontCostDelta` to evaluate single-patch removal (`init_increase - P_m(c) * (size(G) + k)`) without `ComputeInitFontGlyphDelta` / `ExpandClosure` or cross-patch condition rewriting.
     * Update `Merger::ApplyInitFontMove` / `SegmentationContext` to remove moved `glyphs` directly from `NonInitFontGlyphs()`, `GlyphConditionSet`, and `GlyphGroupings` (and refresh `inert_segments_`) without calling `DependencyClosure::InitFontChanged`.

@@ -302,7 +302,7 @@ btree_map<ActivationCondition, GlyphSet> Merger::InitFontConditionsToCheck(
   return conditions;
 }
 
-Status Merger::MoveSegmentsToInitFont(size_t profile_index) {
+StatusOr<SegmentSet> Merger::MoveSegmentsToInitFont(size_t profile_index) {
   const auto* profile = TRY(strategy_.GetProbabilityProfile(profile_index));
   if (!profile->init_font_merge_threshold.has_value()) {
     return absl::FailedPreconditionError(
@@ -320,12 +320,12 @@ Status Merger::MoveSegmentsToInitFont(size_t profile_index) {
   // First is batch mode. In batch mode only inert segments are checked
   // for move. Any segments that are below the threshold are moved to the
   // init font in a single operation. Because inert segments are not
-  // expected to interact we don't need to reform the closure analysis
-  // after each individual move to get an accurate cost delta.
+  // expected to interact we can evaluate them against the current init font
+  // and move them together.
   //
   // Once batch processing has no more moves left, the processing switches
   // to non-batch processing where all candidate conditions are checked
-  // and moved one at a time.
+  // and moved one at a time so each move sees the updated init font size.
 
   flat_hash_map<ift::common::GlyphSet, uint32_t> smallest_size_increases;
 
@@ -348,14 +348,14 @@ Status Merger::MoveSegmentsToInitFont(size_t profile_index) {
     for (const auto& [condition, glyphs] : conditions) {
       auto best_case_delta =
           TRY(CandidateMerge::ComputeBestCaseInitFontCostDelta(
-              *this, init_font_size, glyphs, profile_index));
+              *this, condition, glyphs, profile_index));
       if (best_case_delta >= lowest_delta) {
         // Filter by best case first which is much faster to compute.
         continue;
       }
 
-      auto [delta, all_glyphs] = TRY(CandidateMerge::ComputeInitFontCostDelta(
-          *this, init_font_size, glyphs, smallest_size_increases,
+      double delta = TRY(CandidateMerge::ComputeInitFontCostDelta(
+          *this, init_font_size, condition, glyphs, smallest_size_increases,
           profile_index));
 
       if (delta >= lowest_delta) {
@@ -369,11 +369,11 @@ Status Merger::MoveSegmentsToInitFont(size_t profile_index) {
           glyphs_for_lowest = GlyphSet{};
         }
         total_delta += delta;
-        glyphs_for_lowest->union_set(all_glyphs);
+        glyphs_for_lowest->union_set(glyphs);
       } else {
         lowest_delta = delta;
         total_delta = delta;
-        glyphs_for_lowest = all_glyphs;
+        glyphs_for_lowest = glyphs;
       }
     }
 
@@ -393,10 +393,8 @@ Status Merger::MoveSegmentsToInitFont(size_t profile_index) {
   } while (true);
 
   VLOG(0) << "Initial font now has "
-          << Context().SegmentationInfo().InitFontSegment().codepoints.size()
-          << " codepoints and "
           << Context().SegmentationInfo().InitFontGlyphs().size() << " glyphs";
-  return absl::OkStatus();
+  return inscope;
 }
 
 Status Merger::ResetSegmentProbabilities() const {
@@ -1151,11 +1149,7 @@ Status Merger::ApplyInitFontMove(const GlyphSet& glyphs_to_move, double delta) {
   VLOG(0) << "  Moving " << glyphs_to_move.size()
           << " glyphs into the initial font (cost delta = " << delta << ")";
 
-  SubsetDefinition initial_segment =
-      Context().SegmentationInfo().InitFontSegment();
-  initial_segment.gids.union_set(glyphs_to_move);
-
-  TRYV(Context().ReassignInitSubset(initial_segment));
+  TRYV(Context().MoveGlyphsToInitFont(glyphs_to_move));
   TRYV(ReassignInitSubset());
 
   return absl::OkStatus();

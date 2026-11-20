@@ -90,6 +90,28 @@ class InitialFont {
     return glyph_keyed_glyphs_;
   }
 
+  // Returns true if all codepoints, glyphs, features, and design space ranges
+  // in `def` are already present in the initial font's output sets.
+  bool ContainsSegment(const SubsetDefinition& def) const {
+    if (!def.codepoints.is_subset_of(table_keyed_codepoints_) ||
+        !def.gids.is_subset_of(glyph_keyed_glyphs_)) {
+      return false;
+    }
+    for (hb_tag_t tag : def.feature_tags) {
+      if (!table_keyed_features_.contains(tag)) {
+        return false;
+      }
+    }
+    for (const auto& [tag, range] : def.design_space) {
+      auto it = closed_input_definition_.design_space.find(tag);
+      if (it == closed_input_definition_.design_space.end() ||
+          it->second != range) {
+        return false;
+      }
+    }
+    return true;
+  }
+
  private:
   bool has_closed_input_ = false;
   // Subset definition provided by the input configuration, includes glyph
