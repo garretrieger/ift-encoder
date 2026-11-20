@@ -9,7 +9,7 @@
 #include "absl/status/statusor.h"
 #include "ift/common/int_set.h"
 #include "ift/encoder/glyph_closure_cache.h"
-#include "ift/encoder/init_subset_defaults.h"
+#include "ift/encoder/initial_font.h"
 #include "ift/encoder/segment.h"
 #include "ift/encoder/subset_definition.h"
 #include "ift/encoder/types.h"
@@ -54,23 +54,48 @@ class RequestedSegmentationInformation {
   absl::Status ReassignInitSubset(GlyphClosureCache& closure_cache,
                                   const SubsetDefinition& new_def);
 
-  const SubsetDefinition& InitFontSegment() const { return init_font_segment_; }
+  // Moves `glyphs` into the glyph-keyed initial font (removing them from
+  // `non_init_font_glyphs_` and `non_init_font_non_empty_glyphs_`) without
+  // running closure expansion or modifying `init_font_.ClosedInputDefinition()`
+  // or `segments_`.
+  void MoveGlyphsToInitFont(const ift::common::GlyphSet& glyphs);
 
-  // Returns the init font segment with all default always included items
-  // removed
-  //
-  // this is useful when we need to know what non-default items are included
-  // in the init font segment.
-  const SubsetDefinition InitFontSegmentWithoutDefaults() const {
-    SubsetDefinition result = init_font_segment_;
-    SubsetDefinition defaults;
-    AddInitSubsetDefaults(defaults);
-    result.Subtract(defaults);
-    return result;
+  // Unions `def.codepoints` and `def.feature_tags` into the table-keyed
+  // initial font without running closure expansion or removing items from
+  // `segments_`.
+  void AddToInitFontSegment(const SubsetDefinition& def);
+
+  // Clears segments in `unused_segments`, recording their definitions in
+  // `init_font_.UnsegmentedDefinition()` and updating `codepoint_to_segments_`.
+  void ClearUnusedInitSegments(const ift::common::SegmentSet& unused_segments);
+
+  // Replays moved initial-font state on top of the frozen closed input
+  // baseline.
+  absl::Status ReplayInitFontMoves(GlyphClosureCache& closure_cache,
+                                   const InitialFont& init_font);
+
+  const InitialFont& InitFont() const { return init_font_; }
+
+  // Glyphs in `full_closure_` excluding `init_font_.ClosedInputGlyphs()`. Used
+  // by `DependencyClosure` and `DependencyGraph`.
+  const ift::common::GlyphSet& NonClosedInputGlyphs() const {
+    return non_closed_input_glyphs_;
+  }
+
+  // Output initial font segment and outline glyphs (including items moved
+  // directly without closure expansion).
+  SubsetDefinition InitFontSegment() const {
+    return init_font_.TableKeyedDefinition();
+  }
+
+  // Returns the table-keyed init font segment with all default always included
+  // items removed.
+  SubsetDefinition InitFontSegmentWithoutDefaults() const {
+    return init_font_.TableKeyedDefinitionWithoutDefaults();
   }
 
   const ift::common::GlyphSet& InitFontGlyphs() const {
-    return init_font_segment_.gids;
+    return init_font_.GlyphKeyedGlyphs();
   }
   const ift::common::GlyphSet& NonInitFontGlyphs() const {
     return non_init_font_glyphs_;
@@ -120,7 +145,7 @@ class RequestedSegmentationInformation {
 
     // Init font subset definition must be part of the closure input
     // since it contributes to reachability of things.
-    def.Union(InitFontSegment());
+    def.Union(init_font_.ClosedInputDefinition());
 
     return def;
   }
@@ -129,19 +154,24 @@ class RequestedSegmentationInformation {
       const ift::common::CodepointSet& codepoints) const;
 
  private:
+  absl::Status RefreshClosures(GlyphClosureCache& closure_cache);
   void AddToIndex(segment_index_t seg_idx,
                   const ift::common::CodepointSet& codepoints);
   void RemoveFromIndex(segment_index_t seg_idx,
                        const ift::common::CodepointSet& codepoints);
 
   std::vector<Segment> segments_;
-  SubsetDefinition init_font_segment_;
+  InitialFont init_font_;
   SubsetDefinition full_definition_;
   ift::common::GlyphSet full_closure_;
   ift::common::CodepointSet full_codepoint_closure_;
   ift::common::GlyphSet checked_empty_glyphs_;
   ift::common::GlyphSet empty_glyphs_;
+  // Glyphs in `full_closure_` excluding `init_font_.ClosedInputGlyphs()`.
+  ift::common::GlyphSet non_closed_input_glyphs_;
+  // Glyphs in `full_closure_` excluding `init_font_.GlyphKeyedGlyphs()`.
   ift::common::GlyphSet non_init_font_glyphs_;
+  // `non_init_font_glyphs_` excluding empty outline glyphs.
   ift::common::GlyphSet non_init_font_non_empty_glyphs_;
 
   bool segments_disjoint_;

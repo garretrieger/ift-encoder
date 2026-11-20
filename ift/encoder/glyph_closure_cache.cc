@@ -94,7 +94,8 @@ SubsetDefinition ComputeExceptSegment(
   except_segment_ids.invert();
 
   uint32_t num_segments = segmentation_info.Segments().size();
-  SubsetDefinition except_segment = segmentation_info.InitFontSegment();
+  SubsetDefinition except_segment =
+      segmentation_info.InitFont().UnsegmentedDefinition();
   for (segment_index_t s : except_segment_ids) {
     if (s >= num_segments) {
       break;

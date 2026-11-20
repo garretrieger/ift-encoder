@@ -165,9 +165,9 @@ SegmentationPlan GlyphSegmentation::ToSegmentationPlanProto() const {
   *config.mutable_initial_features() =
       TagsToSetProto<Features>(InitialFontSegment().feature_tags);
 
-  if (!InitialFontSegment().gids.empty()) {
+  if (!InitialFontGlyphClosure().empty()) {
     *config.mutable_initial_glyphs() =
-        ToSetProto<Glyphs>(InitialFontSegment().gids);
+        ToSetProto<Glyphs>(InitialFontGlyphClosure());
   }
 
   return config;

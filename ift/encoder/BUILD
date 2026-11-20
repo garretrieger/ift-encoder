@@ -140,11 +140,13 @@ cc_library(
     name = "segmentation_info",
     srcs = [
         "glyph_closure_cache.cc",
+        "initial_font.cc",
         "requested_segmentation_information.cc",
     ],
     hdrs = [
         "glyph_closure_cache.h",
         "init_subset_defaults.h",
+        "initial_font.h",
         "requested_segmentation_information.h",
     ],
     visibility = [
@@ -158,6 +160,7 @@ cc_library(
         "//ift/common:try",
         "//ift/dep_graph:unicode_edges",
         "//ift/feature_registry",
+        "@abseil-cpp//absl/container:btree",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
@@ -328,6 +331,7 @@ cc_test(
         "//ift/common:data_file_resolver",
         "//ift/common:test_font_loader",
         "//ift/freq:common",
+        "@abseil-cpp//absl/status",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],

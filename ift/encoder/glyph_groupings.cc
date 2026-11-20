@@ -97,8 +97,8 @@ StatusOr<GlyphSegmentation> GlyphGroupings::ToGlyphSegmentation(
     const RequestedSegmentationInformation& segmentation_info,
     bool exclusive_only) const {
   GlyphSegmentation segmentation(
-      segmentation_info.InitFontSegmentWithoutDefaults(),
-      segmentation_info.InitFontGlyphs());
+      segmentation_info.InitFont().TableKeyedDefinitionWithoutDefaults(),
+      segmentation_info.InitFont().GlyphKeyedGlyphs());
   segmentation.CopySegments(segmentation_info.SegmentSubsetDefinitions());
 
   btree_map<ActivationCondition, GlyphSet> filtered_conditions;

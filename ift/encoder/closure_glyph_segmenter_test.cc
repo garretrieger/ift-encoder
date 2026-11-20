@@ -3465,8 +3465,13 @@ TEST_F(ClosureGlyphSegmenterTest,
     // gid_target's condition is overestimated by dep graph to always true (due
     // to nested context lookups), so it should be in the initial
     // font despite not being specified in the initial segment.
-    EXPECT_TRUE(segmentation->InitialFontSegment().gids.contains(gid_target));
+    EXPECT_FALSE(segmentation->InitialFontSegment().gids.contains(gid_target));
     EXPECT_TRUE(segmentation->InitialFontGlyphClosure().contains(gid_target));
+    auto plan = segmentation->ToSegmentationPlanProto();
+    ift::common::GlyphSet plan_init_glyphs;
+    plan_init_glyphs.insert(plan.initial_glyphs().values().begin(),
+                            plan.initial_glyphs().values().end());
+    EXPECT_TRUE(plan_init_glyphs.contains(gid_target));
 
     bool found_c = false;
     for (const auto& [_, gids] : segmentation->GidSegments()) {
@@ -3856,6 +3861,73 @@ p0: { gid3 }
 if (s1) then p0
 )");
   }
+}
+
+TEST_F(ClosureGlyphSegmenterTest,
+       MoveGlyphsAndSegmentsToInitFontWithoutClosureExpansion) {
+  auto context_or = SegmentationContext::InitializeSegmentationContext(
+      roboto.get(), {}, {{{'a'}}, {{'f'}}, {{'i'}}}, DEP_GRAPH_ONLY, 8, 8,
+      resolver);
+  ASSERT_TRUE(context_or.ok()) << context_or.status();
+  SegmentationContext& context = *context_or;
+
+  glyph_id_t gid_a = FontHelper::GetNominalGlyph(roboto.get(), 'a').value();
+  glyph_id_t gid_f = FontHelper::GetNominalGlyph(roboto.get(), 'f').value();
+  glyph_id_t gid_i = FontHelper::GetNominalGlyph(roboto.get(), 'i').value();
+  // 'fi' ligature in Roboto-Regular.ttf
+  constexpr glyph_id_t gid_fi = 444;
+
+  ASSERT_TRUE(context.MoveGlyphsToInitFont({gid_a, gid_f, gid_i}).ok());
+  context.AddToInitFontSegment({'a', 'f', 'i'});
+  context.ClearUnusedInitSegments({0});
+
+  // Conjunctive 'fi' condition (s1 AND s2) must remain unweakened even though
+  // gid_f, gid_i, 'f', and 'i' were moved to the initial font.
+  ActivationCondition fi_cond = ActivationCondition::and_segments({1, 2}, 0);
+  ASSERT_TRUE(context.glyph_groupings.ConditionsAndGlyphs().contains(fi_cond));
+  EXPECT_TRUE(
+      context.glyph_groupings.ConditionsAndGlyphs().at(fi_cond).contains(
+          gid_fi));
+
+  // WithSameSettings preserves both the frozen closure baseline and the
+  // non-closured moves/cleared segments.
+  auto replayed_or = context.WithSameSettings();
+  ASSERT_TRUE(replayed_or.ok()) << replayed_or.status();
+  ASSERT_TRUE(replayed_or->ReprocessAll().ok());
+  EXPECT_TRUE(replayed_or->glyph_groupings == context.glyph_groupings);
+  EXPECT_EQ(replayed_or->glyph_condition_set, context.glyph_condition_set);
+
+  // ToGlyphSegmentation validates closure conditions via ComputeExceptSegment.
+  auto segmentation_or = context.ToGlyphSegmentation();
+  ASSERT_TRUE(segmentation_or.ok()) << segmentation_or.status();
+  const GlyphSegmentation& segmentation = *segmentation_or;
+
+  EXPECT_EQ(segmentation.InitialFontSegment().codepoints,
+            (CodepointSet{'a', 'f', 'i'}));
+  EXPECT_TRUE(segmentation.InitialFontGlyphClosure().contains(gid_a));
+  EXPECT_TRUE(segmentation.InitialFontGlyphClosure().contains(gid_f));
+  EXPECT_TRUE(segmentation.InitialFontGlyphClosure().contains(gid_i));
+  EXPECT_FALSE(segmentation.InitialFontGlyphClosure().contains(gid_fi));
+  EXPECT_EQ(segmentation.Segments(),
+            (std::vector<SubsetDefinition>{{}, {'f'}, {'i'}}));
+
+  ift::config::SegmentationPlan plan = segmentation.ToSegmentationPlanProto();
+  CodepointSet plan_init_cps;
+  plan_init_cps.insert(plan.initial_codepoints().values().begin(),
+                       plan.initial_codepoints().values().end());
+  EXPECT_EQ(plan_init_cps, (CodepointSet{'a', 'f', 'i'}));
+
+  ift::common::GlyphSet plan_init_gids;
+  plan_init_gids.insert(plan.initial_glyphs().values().begin(),
+                        plan.initial_glyphs().values().end());
+  EXPECT_TRUE(plan_init_gids.contains(gid_a));
+  EXPECT_TRUE(plan_init_gids.contains(gid_f));
+  EXPECT_TRUE(plan_init_gids.contains(gid_i));
+  EXPECT_FALSE(plan_init_gids.contains(gid_fi));
+
+  EXPECT_FALSE(plan.segments().contains(0));
+  EXPECT_TRUE(plan.segments().contains(1));
+  EXPECT_TRUE(plan.segments().contains(2));
 }
 
 }  // namespace ift::encoder

@@ -51,9 +51,9 @@ class DependencyClosure {
     return glyph_condition_cache_;
   }
 
-  // Glyphs in NonInitFontGlyphs() whose dependency-graph condition evaluated
-  // to IsAlwaysTrue() (e.g. due to hb_subset_depend over-approximations on
-  // nested or multi-position contextual lookups).
+  // Glyphs in NonClosedInputGlyphs() whose dependency-graph condition
+  // evaluated to IsAlwaysTrue() (e.g. due to hb_subset_depend over-
+  // approximations on nested or multi-position contextual lookups).
   const common::GlyphSet& AlwaysTrueGlyphs() const {
     return always_true_glyphs_;
   }
