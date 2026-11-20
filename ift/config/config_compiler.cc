@@ -25,6 +25,7 @@ using absl::StatusOr;
 using absl::StrCat;
 using ift::common::AxisRange;
 using ift::common::FontHelper;
+using ift::common::GlyphSet;
 using ift::common::IntSet;
 using ift::common::SegmentSet;
 using ift::encoder::ActivationCondition;
@@ -76,17 +77,21 @@ static flat_hash_map<uint32_t, SubsetDefinition> ParseSegments(
 
 static StatusOr<SubsetDefinition> ParseInitSubset(
     const SegmentationPlan& plan,
-    const flat_hash_map<uint32_t, SubsetDefinition>& segments) {
+    const flat_hash_map<uint32_t, SubsetDefinition>& segments,
+    bool include_glyphs) {
   auto init_codepoints = Values(plan.initial_codepoints());
-  auto init_glyphs = Values(plan.initial_glyphs());
   auto init_features = TagValues(plan.initial_features());
   auto init_segments = Values(plan.initial_segments());
   auto init_design_space = TRY(ToDesignSpace(plan.initial_design_space()));
 
   SubsetDefinition init_subset;
   init_subset.codepoints.insert(init_codepoints.begin(), init_codepoints.end());
-  init_subset.gids.insert(init_glyphs.begin(), init_glyphs.end());
+  if (include_glyphs) {
+    auto init_glyphs = Values(plan.initial_glyphs());
+    init_subset.gids.insert(init_glyphs.begin(), init_glyphs.end());
+  }
 
+  init_subset.feature_tags = init_features;
   for (const auto segment_id : init_segments) {
     auto segment = segments.find(segment_id);
     if (segment == segments.end()) {
@@ -99,7 +104,6 @@ static StatusOr<SubsetDefinition> ParseInitSubset(
                                     segment->second.feature_tags.end());
   }
 
-  init_subset.feature_tags = init_features;
   init_subset.design_space = init_design_space;
   return init_subset;
 }
@@ -126,8 +130,16 @@ Status ConfigCompiler::Configure(const SegmentationPlan& plan,
   }
 
   // Initial subset definition
-  SubsetDefinition init_subset = TRY(ParseInitSubset(plan, segments));
+  bool separate_init_glyphs =
+      !plan.glyph_patches().empty() && plan.has_initial_glyphs();
+  SubsetDefinition init_subset = TRY(ParseInitSubset(
+      plan, segments, /*include_glyphs=*/!separate_init_glyphs));
   TRYV(compiler.SetInitSubsetFromDef(init_subset));
+  if (separate_init_glyphs) {
+    GlyphSet init_glyphs;
+    init_glyphs.union_set(Values(plan.initial_glyphs()));
+    TRYV(compiler.SetInitGlyphs(init_glyphs));
+  }
 
   // Next configure the table keyed segments
   for (const auto& codepoints : plan.non_glyph_codepoint_segmentation()) {
@@ -214,7 +226,8 @@ Status ConfigCompiler::Configure(const SegmentationPlan& plan,
     TRYV(compiler.AddGlyphPatchCondition(segment_id, c.activated_patch()));
   }
 
-  SubsetDefinition init_subset = TRY(ParseInitSubset(plan, segments));
+  SubsetDefinition init_subset =
+      TRY(ParseInitSubset(plan, segments, /*include_glyphs=*/true));
   TRYV(compiler.SetInitSubsetFromDef(init_subset));
 
   return absl::OkStatus();

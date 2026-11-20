@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -42,6 +43,7 @@ using ift::common::BinaryDiff;
 using ift::common::CompatId;
 using ift::common::FontData;
 using ift::common::FontHelper;
+using ift::common::GlyphSet;
 using ift::common::hb_blob_unique_ptr;
 using ift::common::hb_face_unique_ptr;
 using ift::common::IntSet;
@@ -91,6 +93,9 @@ StatusOr<FontData> Compiler::FullyExpandedSubset(
     const ProcessingContext& context) const {
   SubsetDefinition all;
   all.Union(context.init_subset_);
+  if (init_glyphs_.has_value()) {
+    all.gids.union_set(*init_glyphs_);
+  }
 
   for (const auto& s : extension_subsets_) {
     all.Union(s);
@@ -190,6 +195,18 @@ std::vector<Compiler::Edge> Compiler::OutgoingEdgesWithMaxDepth(
   return edges;
 }
 
+Status Compiler::ValidateGlyphsInFace(const IntSet& gids,
+                                      string_view label) const {
+  uint32_t glyph_count = hb_face_get_glyph_count(face_.get());
+  for (uint32_t gid : gids) {
+    if (gid >= glyph_count) {
+      return absl::InvalidArgumentError(
+          StrCat(label, " has gid, ", gid, ", which is not in the font."));
+    }
+  }
+  return absl::OkStatus();
+}
+
 Status Compiler::AddGlyphDataPatch(uint32_t id, const IntSet& gids) {
   if (!face_) {
     return absl::FailedPreconditionError("Encoder must have a face set.");
@@ -200,14 +217,7 @@ Status Compiler::AddGlyphDataPatch(uint32_t id, const IntSet& gids) {
         StrCat("A segment with id, ", id, ", has already been supplied."));
   }
 
-  uint32_t glyph_count = hb_face_get_glyph_count(face_.get());
-
-  for (uint32_t gid : gids) {
-    if (gid >= glyph_count) {
-      return absl::InvalidArgumentError(
-          StrCat("Patch has gid, ", gid, ", which is not in the font."));
-    }
-  }
+  TRYV(ValidateGlyphsInFace(gids, "Patch"));
 
   glyph_data_patches_[id] = gids;
   next_id_ = std::max(next_id_, id + 1);
@@ -261,11 +271,28 @@ void Compiler::AddDesignSpaceSegment(const design_space_t& space) {
   extension_subsets_.push_back(def);
 }
 
+Status Compiler::SetInitGlyphs(const GlyphSet& init_glyphs) {
+  if (init_glyphs_.has_value()) {
+    return absl::FailedPreconditionError(
+        "Initial glyphs have already been set.");
+  }
+
+  if (face_) {
+    TRYV(ValidateGlyphsInFace(init_glyphs, "Initial glyphs"));
+  }
+
+  init_glyphs_ = init_glyphs;
+  return absl::OkStatus();
+}
+
 StatusOr<Compiler::Encoding> Compiler::Compile() const {
   // See ../../docs/compiler.md for a detailed discussion of
   // how this implementation works.
   if (!face_) {
     return absl::FailedPreconditionError("Encoder must have a face set.");
+  }
+  if (init_glyphs_.has_value()) {
+    TRYV(ValidateGlyphsInFace(*init_glyphs_, "Initial glyphs"));
   }
 
   ProcessingContext context(next_id_);
@@ -273,10 +300,11 @@ StatusOr<Compiler::Encoding> Compiler::Compile() const {
   AddInitSubsetDefaults(context.init_subset_);
   context.initial_remaining_subsets_count_ =
       RemainingSubsets(context.init_subset_).size();
-  if (IsMixedMode()) {
+  if (IsMixedMode() && !init_glyphs_.has_value()) {
     // Glyph keyed patches can't change the glyph count in the font (and hence
     // loca len) so always include the last gid in the init subset to force the
-    // loca table to remain at the full length from the start.
+    // loca table to remain at the full length from the start when explicit
+    // init_glyphs_ (which uses HB_SUBSET_FLAGS_RETAIN_NUM_GLYPHS) is not set.
     //
     // TODO(garretrieger): this unnecessarily includes the last gid in the
     //  subset, should update the subsetter to retain the glyph count
@@ -801,6 +829,75 @@ StatusOr<hb_face_unique_ptr> Compiler::CutSubsetFaceBuilder(
   return result;
 }
 
+StatusOr<hb_face_unique_ptr> Compiler::CutOutlineSubsetFaceBuilder(
+    const ProcessingContext& context, hb_face_t* font, const GlyphSet& gids,
+    const design_space_t& design_space) const {
+  // Build a zero-copy face view without non-outline closure tables (notably
+  // cmap, which hb-subset otherwise scans unconditionally when glyphs are
+  // supplied, as well as GSUB/GPOS/GDEF/MATH/COLR/CPAL/VARC).
+  static const absl::flat_hash_set<hb_tag_t> kExcludedClosureTables = {
+      HB_TAG('c', 'm', 'a', 'p'), FontHelper::kGSUB,
+      FontHelper::kGPOS,          HB_TAG('G', 'D', 'E', 'F'),
+      HB_TAG('M', 'A', 'T', 'H'), HB_TAG('C', 'O', 'L', 'R'),
+      HB_TAG('C', 'P', 'A', 'L'), HB_TAG('V', 'A', 'R', 'C'),
+  };
+
+  hb_face_unique_ptr source_without_closure_tables =
+      make_hb_face(hb_face_builder_create());
+  for (hb_tag_t tag : FontHelper::GetTags(font)) {
+    if (kExcludedClosureTables.contains(tag)) {
+      continue;
+    }
+    hb_blob_unique_ptr blob = make_hb_blob(hb_face_reference_table(font, tag));
+    hb_face_builder_add_table(source_without_closure_tables.get(), tag,
+                              blob.get());
+  }
+
+  hb_subset_input_t* input = hb_subset_input_create_or_fail();
+  if (!input) {
+    return absl::InternalError("Failed to create subset input.");
+  }
+
+  gids.union_into(hb_subset_input_glyph_set(input));
+
+  for (const auto& [tag, range] : design_space) {
+    hb_subset_input_set_axis_range(input, source_without_closure_tables.get(),
+                                   tag, range.start(), range.end(), NAN);
+  }
+
+  hb_set_t* drop_tables =
+      hb_subset_input_set(input, HB_SUBSET_SETS_DROP_TABLE_TAG);
+  for (hb_tag_t tag : kExcludedClosureTables) {
+    hb_set_add(drop_tables, tag);
+  }
+
+  SetMixedModeSubsettingFlagsIfNeeded(context, input);
+  unsigned flags =
+      hb_subset_input_get_flags(input) | HB_SUBSET_FLAGS_NO_LAYOUT_CLOSURE |
+      HB_SUBSET_FLAGS_NO_BIDI_CLOSURE | HB_SUBSET_FLAGS_RETAIN_NUM_GLYPHS;
+  if (!gids.contains(0)) {
+    flags &= ~HB_SUBSET_FLAGS_NOTDEF_OUTLINE;
+  }
+  hb_subset_input_set_flags(input, flags);
+
+  hb_subset_plan_t* plan =
+      hb_subset_plan_create_or_fail(source_without_closure_tables.get(), input);
+  hb_subset_input_destroy(input);
+  if (!plan) {
+    return absl::InternalError(
+        "Harfbuzz outline subsetting plan generation failed.");
+  }
+
+  hb_face_unique_ptr result =
+      make_hb_face(hb_subset_plan_execute_or_fail(plan));
+  hb_subset_plan_destroy(plan);
+  if (!result.get()) {
+    return absl::InternalError("Harfbuzz outline subsetting operation failed.");
+  }
+
+  return result;
+}
+
 StatusOr<FontData> Compiler::GenerateBaseGvar(
     const ProcessingContext& context, hb_face_t* font,
     const design_space_t& design_space) const {
@@ -825,14 +922,19 @@ StatusOr<FontData> Compiler::GenerateBaseGvar(
   auto instance = TRY(Instance(context, font, design_space));
 
   // Step 2: glyph subsetting
-  SubsetDefinition subset = context.init_subset_;
-  // We don't want to apply any instancing here as it was done in step 1
-  // so clear out the design space.
-  subset.design_space = {};
-
   hb_face_unique_ptr instanced_face = instance.face();
-  auto face_builder =
-      TRY(CutSubsetFaceBuilder(context, instanced_face.get(), subset));
+  hb_face_unique_ptr face_builder = make_hb_face(nullptr);
+  if (init_glyphs_.has_value()) {
+    face_builder = TRY(CutOutlineSubsetFaceBuilder(
+        context, instanced_face.get(), *init_glyphs_, {}));
+  } else {
+    SubsetDefinition subset = context.init_subset_;
+    // We don't want to apply any instancing here as it was done in step 1
+    // so clear out the design space.
+    subset.design_space = {};
+    face_builder =
+        TRY(CutSubsetFaceBuilder(context, instanced_face.get(), subset));
+  }
 
   // Step 3: extract gvar table.
   hb_blob_unique_ptr gvar_blob = make_hb_blob(
@@ -925,19 +1027,23 @@ StatusOr<FontData> Compiler::GenerateBaseCff2(
   auto instance = TRY(Instance(context, font, design_space));
   auto instance_face = instance.face();
 
-  // Step 2: find the glyph closure for the base subset.
-  SubsetDefinition subset = context.init_subset_;
-  hb_subset_plan_t* plan = TRY(CreateSubsetPlan(context, font, subset));
-  hb_map_t* old_to_new = hb_subset_plan_old_to_new_glyph_mapping(plan);
-
-  int index = -1;
-  uint32_t old_gid = HB_MAP_VALUE_INVALID;
-  uint32_t new_gid = HB_MAP_VALUE_INVALID;
+  // Step 2: find the retained glyphs for the base subset.
   IntSet gids;
-  while (hb_map_next(old_to_new, &index, &old_gid, &new_gid)) {
-    gids.insert(old_gid);
+  if (init_glyphs_.has_value()) {
+    gids = *init_glyphs_;
+  } else {
+    SubsetDefinition subset = context.init_subset_;
+    hb_subset_plan_t* plan = TRY(CreateSubsetPlan(context, font, subset));
+    hb_map_t* old_to_new = hb_subset_plan_old_to_new_glyph_mapping(plan);
+
+    int index = -1;
+    uint32_t old_gid = HB_MAP_VALUE_INVALID;
+    uint32_t new_gid = HB_MAP_VALUE_INVALID;
+    while (hb_map_next(old_to_new, &index, &old_gid, &new_gid)) {
+      gids.insert(old_gid);
+    }
+    hb_subset_plan_destroy(plan);
   }
-  hb_subset_plan_destroy(plan);
 
   // Step 3: locate charstrings data
   FontData instance_non_charstrings;
@@ -977,6 +1083,11 @@ void Compiler::SetMixedModeSubsettingFlagsIfNeeded(
             // style to "GenerateBaseGvar()"
             HB_SUBSET_FLAGS_DESUBROUTINIZE);
 
+    if (init_glyphs_.has_value()) {
+      hb_subset_input_set_flags(input, hb_subset_input_get_flags(input) |
+                                           HB_SUBSET_FLAGS_RETAIN_NUM_GLYPHS);
+    }
+
     if (context.force_long_loca_and_gvar_) {
       // IFTB requirements flag has the side effect of forcing long loca and
       // gvar.
@@ -993,13 +1104,9 @@ void Compiler::SetMixedModeSubsettingFlagsIfNeeded(
 // preserves that common data in order to retain compatibility with glyph keyed
 // patching. See the comments in this function for more details.
 //
-// Additionally the set of glyphs in these tables will be set to the set of
-// glyphs in the base subset rather then what's in def since glyph keyed patches
-// are responsible for populating those.
-//
-// Special casing isn't needed for glyf or CFF since those are never patched
-// by table keyed patches and don't have common data (CFF is desubroutinized)
-// so we can just ignore them here.
+// Additionally when explicit init_glyphs_ is configured, outline tables
+// (glyf/loca, gvar, CFF, CFF2) are populated using init_glyphs_ without layout
+// or cmap closure rather than the closure of def.
 StatusOr<FontData> Compiler::CutSubset(const ProcessingContext& context,
                                        hb_face_t* font,
                                        const SubsetDefinition& def,
@@ -1007,6 +1114,41 @@ StatusOr<FontData> Compiler::CutSubset(const ProcessingContext& context,
   auto result = TRY(CutSubsetFaceBuilder(context, font, def));
 
   auto tags = FontHelper::GetTags(font);
+  if (generate_glyph_keyed_bases && init_glyphs_.has_value() &&
+      (tags.contains(FontHelper::kGlyf) || tags.contains(FontHelper::kCFF))) {
+    auto outline_face = TRY(CutOutlineSubsetFaceBuilder(
+        context, font, *init_glyphs_, def.design_space));
+    if (tags.contains(FontHelper::kGlyf)) {
+      hb_blob_unique_ptr glyf_blob = make_hb_blob(
+          hb_face_reference_table(outline_face.get(), FontHelper::kGlyf));
+      hb_face_builder_add_table(result.get(), FontHelper::kGlyf,
+                                glyf_blob.get());
+
+      hb_blob_unique_ptr loca_blob = make_hb_blob(
+          hb_face_reference_table(outline_face.get(), FontHelper::kLoca));
+      hb_face_builder_add_table(result.get(), FontHelper::kLoca,
+                                loca_blob.get());
+
+      bool outline_long_loca = TRY(FontHelper::HasLongLoca(outline_face.get()));
+      bool result_long_loca = TRY(FontHelper::HasLongLoca(result.get()));
+      if (outline_long_loca != result_long_loca) {
+        FontData head = FontHelper::TableData(result.get(), FontHelper::kHead);
+        std::string head_bytes = head.string();
+        head_bytes.at(50) = 0;
+        head_bytes.at(51) = outline_long_loca ? 1 : 0;
+        FontData updated_head(head_bytes);
+        hb_blob_unique_ptr head_blob = updated_head.blob();
+        hb_face_builder_add_table(result.get(), FontHelper::kHead,
+                                  head_blob.get());
+      }
+    }
+
+    if (tags.contains(FontHelper::kCFF)) {
+      hb_blob_unique_ptr cff_blob = make_hb_blob(
+          hb_face_reference_table(outline_face.get(), FontHelper::kCFF));
+      hb_face_builder_add_table(result.get(), FontHelper::kCFF, cff_blob.get());
+    }
+  }
   if (generate_glyph_keyed_bases && TRY(def.IsVariableFor(font)) &&
       tags.contains(FontHelper::kGvar)) {
     // In mixed mode glyph keyed patches handles gvar, except for when design

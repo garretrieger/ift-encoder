@@ -365,6 +365,116 @@ TEST_F(CompilerTest, DontClobberBaseSubset) {
   ASSERT_TRUE(absl::IsFailedPrecondition(s)) << s;
 }
 
+TEST_F(CompilerTest, DontClobberInitGlyphs) {
+  Compiler compiler;
+  auto face = font.face();
+  compiler.SetFace(face.get());
+
+  auto s = compiler.SetInitGlyphs(GlyphSet{});
+  ASSERT_TRUE(s.ok()) << s;
+
+  s = compiler.SetInitGlyphs(GlyphSet{0});
+  ASSERT_TRUE(absl::IsFailedPrecondition(s)) << s;
+}
+
+TEST_F(CompilerTest, InitGlyphs_GidsNotInFace) {
+  {
+    Compiler compiler;
+    auto face = font.face();
+    compiler.SetFace(face.get());
+
+    auto s = compiler.SetInitGlyphs(segment_1_gids);
+    ASSERT_TRUE(absl::IsInvalidArgument(s)) << s;
+  }
+
+  {
+    Compiler compiler;
+    auto s = compiler.SetInitGlyphs(segment_1_gids);
+    ASSERT_TRUE(s.ok()) << s;
+
+    auto face = font.face();
+    compiler.SetFace(face.get());
+    auto encoding = compiler.Compile();
+    ASSERT_TRUE(absl::IsInvalidArgument(encoding.status()))
+        << encoding.status();
+  }
+}
+
+TEST_F(CompilerTest,
+       Encode_MixedMode_SeparateInitGlyphsExcludesLigatureAndLastGid) {
+  // In Roboto-Regular.ttf: 'f' = 74, 'i' = 77, 'fi' = 444, 'l' = 80, 'fl' = 445
+  Compiler compiler;
+  auto orig_face = full_font.face();
+  uint32_t gid_count = hb_face_get_glyph_count(orig_face.get());
+  compiler.SetFace(orig_face.get());
+
+  ASSERT_TRUE(compiler.SetInitSubset(IntSet{'f', 'i'}).ok());
+  ASSERT_TRUE(compiler.SetInitGlyphs(GlyphSet{0, 74, 77}).ok());
+
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(1, {444}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(2, {80, 445}).ok());
+
+  PatchMap::Entry f_cond({'f'}, 0, PatchEncoding::GLYPH_KEYED);
+  f_cond.ignored = true;
+  ASSERT_TRUE(compiler.AddGlyphDataPatchCondition(f_cond).ok());
+
+  PatchMap::Entry i_cond({'i'}, 0, PatchEncoding::GLYPH_KEYED);
+  i_cond.ignored = true;
+  ASSERT_TRUE(compiler.AddGlyphDataPatchCondition(i_cond).ok());
+
+  PatchMap::Entry fi_cond;
+  fi_cond.encoding = PatchEncoding::GLYPH_KEYED;
+  fi_cond.coverage.conjunctive = true;
+  fi_cond.coverage.child_indices = {0, 1};
+  fi_cond.patch_indices = {1};
+  ASSERT_TRUE(compiler.AddGlyphDataPatchCondition(fi_cond).ok());
+
+  ASSERT_TRUE(compiler
+                  .AddGlyphDataPatchCondition(
+                      PatchMap::Entry({'l'}, 2, PatchEncoding::GLYPH_KEYED))
+                  .ok());
+  compiler.AddNonGlyphDataSegment(IntSet{'l'});
+
+  auto encoding = compiler.Compile();
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+  auto init_face = encoding->init_font.face();
+
+  EXPECT_EQ(hb_face_get_glyph_count(init_face.get()), gid_count);
+  EXPECT_EQ(FontHelper::ToCodepointsSet(init_face.get()), (IntSet{'f', 'i'}));
+  EXPECT_TRUE(FontHelper::GetFeatureTags(init_face.get())
+                  .contains(HB_TAG('l', 'i', 'g', 'a')));
+
+  EXPECT_FALSE(FontHelper::GlyfData(init_face.get(), 0)->empty());
+  EXPECT_FALSE(FontHelper::GlyfData(init_face.get(), 74)->empty());
+  EXPECT_FALSE(FontHelper::GlyfData(init_face.get(), 77)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(init_face.get(), 444)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(init_face.get(), 80)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(init_face.get(), gid_count - 1)->empty());
+}
+
+TEST_F(CompilerTest,
+       Encode_MixedMode_SeparateInitGlyphsExcludesNotdefWhenOmitted) {
+  Compiler compiler;
+  auto orig_face = full_font.face();
+  compiler.SetFace(orig_face.get());
+
+  ASSERT_TRUE(compiler.SetInitSubset(IntSet{'f'}).ok());
+  ASSERT_TRUE(compiler.SetInitGlyphs(GlyphSet{74}).ok());
+  ASSERT_TRUE(compiler.AddGlyphDataPatch(1, {0, 77}).ok());
+  ASSERT_TRUE(compiler
+                  .AddGlyphDataPatchCondition(
+                      PatchMap::Entry({'i'}, 1, PatchEncoding::GLYPH_KEYED))
+                  .ok());
+  compiler.AddNonGlyphDataSegment(IntSet{'i'});
+
+  auto encoding = compiler.Compile();
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+  auto init_face = encoding->init_font.face();
+
+  EXPECT_TRUE(FontHelper::GlyfData(init_face.get(), 0)->empty());
+  EXPECT_FALSE(FontHelper::GlyfData(init_face.get(), 74)->empty());
+}
+
 TEST_F(CompilerTest, Encode_OneSubset) {
   Compiler compiler;
   hb_face_t* face = font.reference_face();

@@ -94,7 +94,7 @@ Segments whose exclusive glyphs moved to `init_font_glyphs_` remain active if th
 
 ## Implementation Plan / TODO
 
-- [ ] **Commit 1: Separate `init_subset_` and non-layout-closured `init_glyphs_` in `Compiler`.**
+- [x] **Commit 1: Separate `init_subset_` and non-layout-closured `init_glyphs_` in `Compiler`.**
   * **Files**: `ift/encoder/compiler.{h,cc}`, `ift/config/config_compiler.cc`, `ift/encoder/compiler_test.cc`, `ift/integration_test.cc`.
   * **Changes**:
     * Add `Compiler::SetInitGlyphs(const GlyphSet&)` (`std::optional<GlyphSet> init_glyphs_`) and wire `ConfigCompiler::Configure` (`Compiler` overload) to pass `plan.initial_glyphs()` via `SetInitGlyphs` instead of `init_subset.gids` when `plan` has glyph patches / `initial_glyphs`.
