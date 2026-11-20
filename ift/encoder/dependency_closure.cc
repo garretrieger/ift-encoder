@@ -86,7 +86,7 @@ Status DependencyClosure::InitNodeConditionsCache(
       node_interacting_segments_with_segment_[s].insert(n);
     }
     if (n.IsGlyph() &&
-        segmentation_info_->NonInitFontGlyphs().contains(n.Id())) {
+        segmentation_info_->NonClosedInputGlyphs().contains(n.Id())) {
       glyph_condition_cache_.insert({n.Id(), v.condition});
       glyph_interacting_segment_cache_.insert({n.Id(), v.interacting_segments});
       if (v.condition.IsAlwaysTrue()) {
@@ -137,7 +137,7 @@ void DependencyClosure::UpdateNodeConditionsCache(
     }
 
     if (node.IsGlyph() &&
-        segmentation_info_->NonInitFontGlyphs().contains(node.Id())) {
+        segmentation_info_->NonClosedInputGlyphs().contains(node.Id())) {
       glyph_condition_cache_.erase(node.Id());
       glyph_condition_cache_.insert({node.Id(), new_condition});
       glyph_interacting_segment_cache_.erase(node.Id());
@@ -473,15 +473,16 @@ StatusOr<flat_hash_set<Node>> DependencyClosure::ReachableNonInitFontNodes(
   // before returning.
   reachable.erase(Node::InitFont());
 
-  for (glyph_id_t g : segmentation_info_->InitFontGlyphs()) {
+  const auto& init_font = segmentation_info_->InitFont();
+  for (glyph_id_t g : init_font.ClosedInputGlyphs()) {
     reachable.erase(Node::Glyph(g));
   }
 
-  for (hb_codepoint_t c : segmentation_info_->InitFontSegment().codepoints) {
+  for (hb_codepoint_t c : init_font.ClosedInputDefinition().codepoints) {
     reachable.erase(Node::Unicode(c));
   }
 
-  for (hb_tag_t f : segmentation_info_->InitFontSegment().feature_tags) {
+  for (hb_tag_t f : init_font.ClosedInputDefinition().feature_tags) {
     reachable.erase(Node::Feature(f));
   }
 
@@ -492,12 +493,13 @@ StatusOr<flat_hash_set<Node>> DependencyClosure::InitFontNodes(
     const flat_hash_set<Node>& previous_init_font_nodes,
     flat_hash_set<Node>& new_nodes) const {
   flat_hash_set<Node> init_font_nodes;
+  const auto& init_font = segmentation_info_->InitFont();
 
   init_font_nodes.insert(Node::InitFont());
-  for (glyph_id_t g : segmentation_info_->InitFontGlyphs()) {
+  for (glyph_id_t g : init_font.ClosedInputGlyphs()) {
     init_font_nodes.insert(Node::Glyph(g));
   }
-  for (hb_codepoint_t c : segmentation_info_->InitFontSegment().codepoints) {
+  for (hb_codepoint_t c : init_font.ClosedInputDefinition().codepoints) {
     init_font_nodes.insert(Node::Unicode(c));
   }
   auto init_features = TRY(graph_.InitFontFeatureSet());

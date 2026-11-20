@@ -84,8 +84,11 @@ class SegmentationContext {
 
     std::unique_ptr<RequestedSegmentationInformation> segmentation_info =
         TRY(RequestedSegmentationInformation::Create(
-            SegmentationInfo().Segments(), SegmentationInfo().InitFontSegment(),
+            SegmentationInfo().Segments(),
+            SegmentationInfo().InitFont().ClosedInputDefinition(),
             *closure_cache));
+    TRYV(segmentation_info->ReplayInitFontMoves(*closure_cache,
+                                                SegmentationInfo().InitFont()));
 
     SegmentationContext context(
         original_face.get(), condition_analysis_mode_, brotli_quality_,
@@ -260,6 +263,24 @@ class SegmentationContext {
    */
   absl::Status ReassignInitSubset(SubsetDefinition new_def);
 
+  // Moves `glyphs` into the initial font without closure expansion or
+  // updating DependencyClosure, and removes them from `glyph_condition_set`
+  // and `glyph_groupings`.
+  absl::Status MoveGlyphsToInitFont(const ift::common::GlyphSet& glyphs);
+
+  // Unions `def` into the effective initial font segment without closure
+  // expansion or removing items from `Segments()`.
+  void AddToInitFontSegment(const SubsetDefinition& def) {
+    segmentation_info_->AddToInitFontSegment(def);
+  }
+
+  // Clears segments in `unused_segments` from `SegmentationInfo()` and
+  // `inert_segments_`.
+  void ClearUnusedInitSegments(const ift::common::SegmentSet& unused_segments) {
+    segmentation_info_->ClearUnusedInitSegments(unused_segments);
+    inert_segments_.subtract(unused_segments);
+  }
+
   /*
    * Replaces the segment list, invalidates all condition and grouping
    * information, and fully reprocesses all segments.
@@ -340,6 +361,17 @@ class SegmentationContext {
   // considered to be the place where the potentional upside of optimization is
   // too small to be worthwhile.
   absl::StatusOr<segment_index_t> ComputeSegmentCutoff() const;
+
+  void RefreshUnicodeRangePatchSizeCaches() {
+    if (target_mode_ == config::UNICODE_RANGE) {
+      estimated_compression_ratio_ = std::nullopt;
+      estimated_woff2_base_overhead_ = std::nullopt;
+      patch_size_cache =
+          NewPatchSizeCache(original_face.get(), brotli_quality_);
+      patch_size_cache_for_init_font =
+          NewPatchSizeCache(original_face.get(), init_font_brotli_quality_);
+    }
+  }
 
   // TODO XXXX make this return StatusOr<...>
   std::unique_ptr<PatchSizeCache> NewPatchSizeCache(hb_face_t* face,

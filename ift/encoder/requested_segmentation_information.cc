@@ -10,6 +10,7 @@
 #include "ift/common/int_set.h"
 #include "ift/common/try.h"
 #include "ift/encoder/glyph_closure_cache.h"
+#include "ift/encoder/initial_font.h"
 #include "ift/encoder/segment.h"
 #include "ift/encoder/subset_definition.h"
 
@@ -57,7 +58,7 @@ RequestedSegmentationInformation::Create(std::vector<Segment> segments,
 
 RequestedSegmentationInformation::RequestedSegmentationInformation(
     std::vector<Segment> segments, SubsetDefinition init_font_segment)
-    : segments_(std::move(segments)), init_font_segment_() {
+    : segments_(std::move(segments)) {
   // ReassignInitSubset expects full_definition_ is already populated.
   full_definition_ = init_font_segment;
   for (size_t i = 0; i < segments_.size(); ++i) {
@@ -69,31 +70,32 @@ RequestedSegmentationInformation::RequestedSegmentationInformation(
 void RequestedSegmentationInformation::ResetSegments(
     std::vector<Segment> segments) {
   segments_ = std::move(segments);
+  init_font_.ResetClearedSegments();
+  full_definition_ = init_font_.UnsegmentedDefinition();
+  const CodepointSet& closed_init_codepoints =
+      init_font_.ClosedInputDefinition().codepoints;
   codepoint_to_segments_.clear();
   for (size_t i = 0; i < segments_.size(); ++i) {
     auto& s = segments_[i];
-    if (s.Definition().codepoints.intersects(init_font_segment_.codepoints)) {
-      s.Definition().codepoints.subtract(init_font_segment_.codepoints);
+    if (s.Definition().codepoints.intersects(closed_init_codepoints)) {
+      s.Definition().codepoints.subtract(closed_init_codepoints);
     }
+    full_definition_.Union(s.Definition());
     AddToIndex(i, s.Definition().codepoints);
   }
-  segments_disjoint_ = CheckSegmentsAreDisjoint(init_font_segment_, segments_);
+  segments_disjoint_ =
+      CheckSegmentsAreDisjoint(init_font_.ClosedInputDefinition(), segments_);
 }
 
-Status RequestedSegmentationInformation::ReassignInitSubset(
-    GlyphClosureCache& closure_cache, const SubsetDefinition& new_def) {
-  // TODO XXXXX Can we avoid aggressively expanding the init closure?
-  // ie. run the init subsetting/closure operation purely in glyph form.
-  init_font_segment_ = TRY(closure_cache.ExpandClosure(new_def));
-
-  full_definition_.Union(init_font_segment_);
+Status RequestedSegmentationInformation::RefreshClosures(
+    GlyphClosureCache& closure_cache) {
   full_closure_ = TRY(closure_cache.GlyphClosure(full_definition_));
   full_codepoint_closure_ = closure_cache.CodepointsForGlyphs(full_closure_);
 
-  GlyphSet new_non_init = full_closure_;
-  new_non_init.subtract(InitFontGlyphs());
+  non_closed_input_glyphs_ = full_closure_;
+  non_closed_input_glyphs_.subtract(init_font_.ClosedInputGlyphs());
 
-  GlyphSet unchecked = new_non_init;
+  GlyphSet unchecked = non_closed_input_glyphs_;
   unchecked.subtract(checked_empty_glyphs_);
   if (!unchecked.empty()) {
     empty_glyphs_.union_set(
@@ -101,20 +103,62 @@ Status RequestedSegmentationInformation::ReassignInitSubset(
     checked_empty_glyphs_.union_set(unchecked);
   }
 
-  non_init_font_glyphs_ = std::move(new_non_init);
+  non_init_font_glyphs_ = full_closure_;
+  non_init_font_glyphs_.subtract(init_font_.GlyphKeyedGlyphs());
   non_init_font_non_empty_glyphs_ = non_init_font_glyphs_;
   non_init_font_non_empty_glyphs_.subtract(empty_glyphs_);
+  return absl::OkStatus();
+}
+
+void RequestedSegmentationInformation::MoveGlyphsToInitFont(
+    const GlyphSet& glyphs) {
+  init_font_.AddGlyphKeyedGlyphs(glyphs);
+  non_init_font_glyphs_.subtract(glyphs);
+  non_init_font_non_empty_glyphs_.subtract(glyphs);
+}
+
+void RequestedSegmentationInformation::AddToInitFontSegment(
+    const SubsetDefinition& def) {
+  init_font_.AddToTableKeyed(def);
+}
+
+void RequestedSegmentationInformation::ClearUnusedInitSegments(
+    const SegmentSet& unused_segments) {
+  for (segment_index_t s : unused_segments) {
+    auto& seg = segments_.at(s);
+    init_font_.AddClearedSegment(seg.Definition());
+    RemoveFromIndex(s, seg.Definition().codepoints);
+    seg.Clear();
+  }
+}
+
+Status RequestedSegmentationInformation::ReplayInitFontMoves(
+    GlyphClosureCache& closure_cache, const InitialFont& init_font) {
+  init_font_ = init_font;
+  full_definition_.Union(init_font_.UnsegmentedDefinition());
+  return RefreshClosures(closure_cache);
+}
+
+Status RequestedSegmentationInformation::ReassignInitSubset(
+    GlyphClosureCache& closure_cache, const SubsetDefinition& new_def) {
+  // TODO XXXXX Can we avoid aggressively expanding the init closure?
+  // ie. run the init subsetting/closure operation purely in glyph form.
+  TRYV(init_font_.ReassignClosedInput(closure_cache, new_def));
+  const SubsetDefinition& closed_init = init_font_.ClosedInputDefinition();
+
+  full_definition_.Union(closed_init);
+  TRYV(RefreshClosures(closure_cache));
 
   // Changing the init font subset may have caused additional codepoints to be
   // moved to the init font. We need to update the segment definitions to
   // remove these.
   for (size_t i = 0; i < segments_.size(); ++i) {
     auto& s = segments_[i];
-    if (s.Definition().codepoints.intersects(init_font_segment_.codepoints)) {
+    if (s.Definition().codepoints.intersects(closed_init.codepoints)) {
       CodepointSet intersection = s.Definition().codepoints;
-      intersection.intersect(init_font_segment_.codepoints);
+      intersection.intersect(closed_init.codepoints);
       RemoveFromIndex(i, intersection);
-      s.Definition().codepoints.subtract(init_font_segment_.codepoints);
+      s.Definition().codepoints.subtract(closed_init.codepoints);
     }
   }
   return absl::OkStatus();

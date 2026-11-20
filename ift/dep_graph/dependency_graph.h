@@ -21,8 +21,9 @@
 #include "ift/encoder/types.h"
 
 namespace ift::encoder {
+class InitialFont;
 class RequestedSegmentationInformation;
-}
+}  // namespace ift::encoder
 
 namespace ift::dep_graph {
 
@@ -147,10 +148,7 @@ class DependencyGraph {
     return full_feature_set_;
   }
 
-  const absl::StatusOr<absl::flat_hash_set<hb_tag_t>> InitFontFeatureSet()
-      const {
-    return InitFeatureSet(segmentation_info_, original_face_.get());
-  }
+  absl::StatusOr<absl::flat_hash_set<hb_tag_t>> InitFontFeatureSet() const;
 
   // Returns the set of all glyphs that could satisfy the requirements of a
   // pending edge. For contextual substitutions this is the union of all glyphs
@@ -252,8 +250,7 @@ class DependencyGraph {
       hb_face_t* face);
 
   static absl::StatusOr<absl::flat_hash_set<hb_tag_t>> InitFeatureSet(
-      const ift::encoder::RequestedSegmentationInformation* segmentation_info,
-      hb_face_t* face);
+      const ift::encoder::InitialFont& init_font, hb_face_t* face);
 
   const ift::encoder::RequestedSegmentationInformation* segmentation_info_;
   ift::common::hb_face_unique_ptr original_face_;

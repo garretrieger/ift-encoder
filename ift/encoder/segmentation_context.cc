@@ -271,79 +271,73 @@ Status SegmentationContext::ExcludeEmptyGlyphs() {
   return GroupGlyphs(empty_gids, {});
 }
 
+Status SegmentationContext::MoveGlyphsToInitFont(const GlyphSet& glyphs) {
+  if (glyphs.empty()) {
+    return absl::OkStatus();
+  }
+
+  segmentation_info_->MoveGlyphsToInitFont(glyphs);
+  RefreshUnicodeRangePatchSizeCaches();
+
+  glyph_condition_set.InvalidateGlyphInformation(glyphs);
+  return GroupGlyphs(glyphs, {});
+}
+
 /*
  * Invalidates all grouping information and fully reprocesses all segments.
  */
 Status SegmentationContext::ReassignInitSubset(SubsetDefinition new_def) {
   GlyphConditionSet previous_glyph_condition_set = glyph_condition_set;
-  GlyphSet total_removed_gids;
-  SegmentSet total_segments_with_changed_defs;
-  SegmentSet total_segments_to_reprocess;
 
-  while (true) {
-    // Figure out what's going to change before making the change so that we
-    // can utilize the dep graph to locate affected segments.
-    new_def = TRY(glyph_closure_cache->ExpandClosure(new_def));
-    GlyphSet removed_gids = InitFontMoveTargetGlyphs();
-    removed_gids.intersect(new_def.gids);
-    total_removed_gids.union_set(removed_gids);
+  new_def = TRY(glyph_closure_cache->ExpandClosure(new_def));
+  GlyphSet total_removed_gids = InitFontMoveTargetGlyphs();
+  total_removed_gids.intersect(new_def.gids);
 
-    SegmentSet segments_with_changed_defs;
-    uint32_t s_index = 0;
-    for (const auto& s : segmentation_info_->Segments()) {
-      if (s.Definition().codepoints.intersects(new_def.codepoints)) {
+  SegmentSet segments_with_changed_defs;
+  uint32_t s_index = 0;
+  for (const auto& s : segmentation_info_->Segments()) {
+    if (s.Definition().codepoints.intersects(new_def.codepoints)) {
+      segments_with_changed_defs.insert(s_index);
+    }
+    for (hb_tag_t f : s.Definition().feature_tags) {
+      if (new_def.feature_tags.contains(f)) {
         segments_with_changed_defs.insert(s_index);
+        break;
       }
-      for (hb_tag_t f : s.Definition().feature_tags) {
-        if (new_def.feature_tags.contains(f)) {
-          segments_with_changed_defs.insert(s_index);
-          break;
-        }
-      }
-      s_index++;
     }
-    total_segments_with_changed_defs.union_set(segments_with_changed_defs);
+    s_index++;
+  }
 
-    SubsetDefinition new_def_delta = new_def;
-    new_def_delta.Subtract(SegmentationInfo().InitFontSegment());
-    SegmentSet segments_to_reprocess =
-        TRY(dependency_closure_->SegmentsThatInteractWith(new_def_delta));
-    total_segments_to_reprocess.union_set(segments_to_reprocess);
+  SubsetDefinition new_def_delta = new_def;
+  new_def_delta.Subtract(SegmentationInfo().InitFont().ClosedInputDefinition());
+  SegmentSet segments_to_reprocess =
+      TRY(dependency_closure_->SegmentsThatInteractWith(new_def_delta));
 
-    TRYV(segmentation_info_->ReassignInitSubset(*glyph_closure_cache, new_def));
-    // Dep closure doesn't need the expanded affected set, as it will traverse
-    // from the input segments to find the affected subgraph.
-    TRYV(dependency_closure_->InitFontChanged(segments_with_changed_defs));
+  TRYV(segmentation_info_->ReassignInitSubset(*glyph_closure_cache, new_def));
+  // Dep closure doesn't need the expanded affected set, as it will traverse
+  // from the input segments to find the affected subgraph.
+  TRYV(dependency_closure_->InitFontChanged(segments_with_changed_defs));
 
-    GlyphSet always_true_glyphs = dependency_closure_->AlwaysTrueGlyphs();
-    always_true_glyphs.intersect(TargetGlyphs());
-    if (always_true_glyphs.empty()) {
-      break;
-    }
-
+  GlyphSet always_true_glyphs = dependency_closure_->AlwaysTrueGlyphs();
+  always_true_glyphs.intersect(TargetGlyphs());
+  if (!always_true_glyphs.empty()) {
     VLOG(0) << "Moving " << always_true_glyphs.size()
             << " always-true glyphs into the initial font.";
-    new_def = SegmentationInfo().InitFontSegment();
-    new_def.gids.union_set(always_true_glyphs);
+    segmentation_info_->MoveGlyphsToInitFont(always_true_glyphs);
+    total_removed_gids.union_set(always_true_glyphs);
   }
 
-  if (target_mode_ == config::UNICODE_RANGE) {
-    estimated_compression_ratio_ = std::nullopt;
-    estimated_woff2_base_overhead_ = std::nullopt;
-    patch_size_cache = NewPatchSizeCache(original_face.get(), brotli_quality_);
-    patch_size_cache_for_init_font = NewPatchSizeCache(
-        original_face.get(), init_font_brotli_quality_);
-  }
+  RefreshUnicodeRangePatchSizeCaches();
 
   // All segments depend on the init subset def, so we must reprocess
   // everything. First reset condition set information:
   glyph_condition_set.InvalidateGlyphInformation(total_removed_gids);
-  glyph_condition_set.InvalidateGlyphInformation(total_segments_to_reprocess);
-  inert_segments_.subtract(total_segments_to_reprocess);
+  glyph_condition_set.InvalidateGlyphInformation(segments_to_reprocess);
+  inert_segments_.subtract(segments_to_reprocess);
 
   // Then reprocess segments:
   GlyphSet gids;
-  for (segment_index_t s : total_segments_to_reprocess) {
+  for (segment_index_t s : segments_to_reprocess) {
     gids.union_set(dependency_closure_->SegmentsToAffectedGlyphs({s}));
   }
   gids.intersect(InitFontMoveTargetGlyphs());
@@ -359,7 +353,7 @@ Status SegmentationContext::ReassignInitSubset(SubsetDefinition new_def) {
     }
   }
 
-  TRYV(GroupGlyphs(changed_gids, total_segments_with_changed_defs));
+  TRYV(GroupGlyphs(changed_gids, segments_with_changed_defs));
 
   return absl::OkStatus();
 }
@@ -407,9 +401,7 @@ SegmentationContext::InitializeSegmentationContext(
   if (!always_true_glyphs.empty()) {
     VLOG(0) << "Moving " << always_true_glyphs.size()
             << " always-true glyphs into the initial font.";
-    SubsetDefinition new_def = context.SegmentationInfo().InitFontSegment();
-    new_def.gids.union_set(always_true_glyphs);
-    TRYV(context.ReassignInitSubset(std::move(new_def)));
+    TRYV(context.MoveGlyphsToInitFont(always_true_glyphs));
   }
 
   return context;

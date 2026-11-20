@@ -19,27 +19,29 @@ Instead, it is valid in IFT to place a glyph's outline data into the initial fon
 
 ## Architecture & Design
 
-### 1. Frozen Closure Init Subset vs. Moved Init Glyphs & Subset
+### 1. Frozen Closure Init Subset vs. Moved Init Glyphs & Subset (`InitialFont`)
 
-`RequestedSegmentationInformation` and `SegmentationContext` currently conflate the dependency-graph closure baseline with glyphs/codepoints moved during optimization. These are split into distinct concepts:
+`RequestedSegmentationInformation` previously conflated the dependency-graph closure baseline with glyphs/codepoints moved during optimization. This state is encapsulated in [`InitialFont`](../ift/encoder/initial_font.h) (`init_font_` on `RequestedSegmentationInformation`), separating input closure, unsegmented closure fallback, and mutable output sets:
 
-1. **Frozen Closure Init Subset (`closure_init_subset_`)**:
+1. **Closed Input Baseline (`InitialFont::closed_input_definition_`)**:
    * Computed once during `RequestedSegmentationInformation::Create` by applying `AddInitSubsetDefaults` and `GlyphClosureCache::ExpandClosure` to `SegmenterConfig.initial_segment`.
-   * Codepoints in `closure_init_subset_.codepoints` are subtracted from input `segments_` at initialization as today.
-   * Used exclusively by `DependencyGraph`, `DependencyClosure`, and `ValidateSegmentation`'s `GlyphClosureCache::HasAdditionalConditions` (`ComputeExceptSegment`), and **never modified** thereafter.
-2. **Initial Font Outline Glyphs (`init_font_glyphs_`)**:
-   * Initialized to `closure_init_subset_.gids`, plus any initial `DependencyClosure::AlwaysTrueGlyphs()`, plus (in `IFT` target mode only) all empty outline glyphs from `FontHelper::EmptyGlyphs`.
-   * During the init-font move phase, glyphs from accepted patches are unioned directly into `init_font_glyphs_` with **no closure expansion** and **no `DependencyClosure` update**.
-   * `NonInitFontGlyphs()` (`FullClosure() \ init_font_glyphs_`) replaces `NonInitFontNonEmptyGlyphs()`, so `SegmentationContext::TargetGlyphs()` becomes `NonInitFontGlyphs()` in both `IFT` and `UNICODE_RANGE` modes.
-3. **Effective Initial Font Subset Definition (`effective_init_font_segment_`)**:
-   * Initialized to `closure_init_subset_` and extended during the init-font move phase with eligible moved codepoints/features (without closure expansion).
-   * Subtracted from `AddTableKeyedSegments` and emitted as `initial_codepoints` / `initial_features` in `SegmentationPlan` (with defaults stripped via `InitFontSegmentWithoutDefaults()`).
-   * Adding codepoints/features to `effective_init_font_segment_` does **not** remove them from `segments_[s]` as long as `s` still appears in at least one target glyph condition; segments in `effective_init_font_segment_` with no remaining target glyph conditions are cleared so dead segments are omitted from `plan.segments`.
+   * Codepoints in `closed_input_definition_.codepoints` are subtracted from input `segments_` at initialization as today.
+   * Used exclusively (along with `NonClosedInputGlyphs()`) by `DependencyGraph`, `DependencyClosure`, and `GlyphClosureCache::SegmentClosure`, and **never modified** during optimization moves.
+2. **Glyph-Keyed Initial Font Glyphs (`InitialFont::glyph_keyed_glyphs_`)**:
+   * Initialized to `closed_input_definition_.gids`.
+   * Empty outline glyphs are handled via the `empty_glyphs_init_font` approach: in `IFT` target mode, `NonInitFontNonEmptyGlyphs()` (`NonInitFontGlyphs() \ empty_glyphs_`) excludes unmoved empty glyphs from `TargetGlyphs()` and `ValidateSegmentation`, while `InitFontMoveTargetGlyphs()` retains empty glyphs during init-font moves until `ExcludeEmptyGlyphs()` is called (when an opted-in strategy uses init-font merging).
+   * During `InitializeSegmentationContext` (`always_true_glyphs`) and the init-font move phase, moved glyphs are unioned directly into `glyph_keyed_glyphs_` (and removed from `non_init_font_glyphs_` and `non_init_font_non_empty_glyphs_`) via `MoveGlyphsToInitFont` (`InitialFont::AddGlyphKeyedGlyphs`) with **no closure expansion** and **no `DependencyClosure` update**.
+   * `GlyphSegmentation::ToSegmentationPlanProto()` emits `InitialFontGlyphClosure()` into `SegmentationPlan.initial_glyphs`.
+3. **Table-Keyed Initial Font Sets (`InitialFont::table_keyed_codepoints_`, `table_keyed_features_`, & `unsegmented_definition_`)**:
+   * Initialized from `closed_input_definition_` and extended during the init-font move phase with eligible moved codepoints/features (without closure expansion) via `AddToInitFontSegment` (`InitialFont::AddToTableKeyed`).
+   * `unsegmented_definition_` (`InitialFont::UnsegmentedDefinition()`) tracks `closed_input_definition_` plus any segments cleared by `ClearUnusedInitSegments` (`InitialFont::AddClearedSegment`) so `GlyphClosureCache::ComputeExceptSegment` matches `FullDefinition()`.
+   * Subtracted from `AddTableKeyedSegments` and emitted as `initial_codepoints` / `initial_features` in `SegmentationPlan` (with defaults stripped via `TableKeyedDefinitionWithoutDefaults()` / `InitFontSegmentWithoutDefaults()`).
+   * Adding codepoints/features to `InitialFont::table_keyed_*` does **not** remove them from `segments_[s]` as long as `s` still appears in at least one target glyph condition; segments with no remaining target glyph conditions are cleared via `ClearUnusedInitSegments` so dead segments are omitted from `plan.segments`.
 
 ### 2. Init Font Move Phase (`Merger` & `CandidateMerge`)
 
 #### Patch Moves
-Because patches in `GlyphGroupings::ConditionsAndGlyphs()` are mutually glyph-disjoint and `DependencyClosure` + `segments_` remain unchanged during patch moves, moving a patch `(condition, glyphs)` into `init_font_glyphs_` simply drops that patch without modifying any other patch's glyph set or activation condition:
+Because patches in `GlyphGroupings::ConditionsAndGlyphs()` are mutually glyph-disjoint and `DependencyClosure` + `segments_` remain unchanged during patch moves, moving a patch `(condition, glyphs)` into `InitialFont::glyph_keyed_glyphs_` simply drops that patch without modifying any other patch's glyph set or activation condition:
 
 * **Best-case cost delta**:
   $$\Delta \text{cost}_{\text{best}} = \text{best\_case\_reduction} \times \text{size}(\text{glyphs}) - P_m(\text{condition}) \times (\text{size}(\text{glyphs}) + k)$$
@@ -49,12 +51,12 @@ Because patches in `GlyphGroupings::ConditionsAndGlyphs()` are mutually glyph-di
 * Applying a move removes `glyphs` from `NonInitFontGlyphs()`, `GlyphConditionSet`, and `GlyphGroupings` directly without running `ExpandClosure` or `DependencyClosure::InitFontChanged`.
 
 #### Codepoint & Feature Moves
-During the init-font move phase, after glyph patches (and `IFT`-mode empty glyphs) have been moved to `init_font_glyphs_`, segments are checked for promotion into `effective_init_font_segment_`:
+During the init-font move phase, after glyph patches (including high-probability empty-glyph patches kept in `InitFontMoveTargetGlyphs()`) have been moved to `InitialFont::glyph_keyed_glyphs_` and `ExcludeEmptyGlyphs()` has removed remaining low-probability empty glyphs, segments are checked for promotion into `InitialFont::table_keyed_*`:
 
 1. **Candidate filter**: Consider only segments `s` that:
    * Belong to an opted-in `ProbabilityProfile` (`init_font_merge_threshold.has_value()`) and pass that profile's probability threshold (`Merger::InitFontApplyProbabilityThreshold(profile_index)`), **and**
-   * Appear in the condition (`DependencyClosure::AllGlyphConditions()`) of at least one glyph in `init_font_glyphs_`.
-2. **Single-segment satisfaction check**: Add `s`'s codepoints and features to `effective_init_font_segment_` **iff** no remaining patch condition `c` in `GlyphGroupings::ConditionsAndGlyphs()` is satisfied by `s` alone:
+   * Appear in the condition (`DependencyClosure::AllGlyphConditions()`) of at least one glyph in `InitialFont::glyph_keyed_glyphs_`.
+2. **Single-segment satisfaction check**: Add `s`'s codepoints and features to `InitialFont::table_keyed_*` **iff** no remaining patch condition `c` in `GlyphGroupings::ConditionsAndGlyphs()` is satisfied by `s` alone:
    ```cpp
    bool IsSatisfiedBySingleSegment(const ActivationCondition& c, segment_index_t s) {
      for (const SegmentSet& clause : c.conditions()) {
@@ -63,12 +65,12 @@ During the init-font move phase, after glyph patches (and `IFT`-mode empty glyph
      return !c.conditions().empty();
    }
    ```
-   This uniformly excludes segments that still have an unmoved exclusive patch `if (s)` or an unmoved disjunctive patch `if (s OR s_2)` (avoiding vacuously empty `ExclusiveGlyphs(s)` when glyphs are shared), while allowing segments whose only remaining conditions are conjunctive (such as `s_f AND s_i` or `s_a AND s_smcp`) to move into `effective_init_font_segment_`.
-3. **Segment cleanup**: After init-font moving finishes across all profiles, any segment `s` whose definition is a subset of `effective_init_font_segment_` and which has `TriggeringSegmentToConditions(s).empty()` is cleared; segments still referenced by target glyph conditions remain intact for `AllPairsMerger` and `IFTX` condition compilation.
+   This uniformly excludes segments that still have an unmoved exclusive patch `if (s)` or an unmoved disjunctive patch `if (s OR s_2)` (avoiding vacuously empty `ExclusiveGlyphs(s)` when glyphs are shared), while allowing segments whose only remaining conditions are conjunctive (such as `s_f AND s_i` or `s_a AND s_smcp`) to move into `InitialFont::table_keyed_*`.
+3. **Segment cleanup**: After init-font moving finishes across all profiles, any segment `s` whose definition is a subset of `InitialFont::TableKeyedDefinition()` and which has `TriggeringSegmentToConditions(s).empty()` is cleared via `ClearUnusedInitSegments`; segments still referenced by target glyph conditions remain intact for `AllPairsMerger` and `IFTX` condition compilation.
 
 ### 3. Merging Segments Without Exclusive Glyphs (`AllPairsMerger` & `Merger`)
 
-Segments whose exclusive glyphs moved to `init_font_glyphs_` remain active if they still appear in target glyph conditions (e.g. `s_a..s_z` in `(s_a AND s_smcp)`). Expanding `AllPairsMerger` to merge these segments avoids leaving dozens of 1-glyph feature/ligature patches unmerged, while preserving two invariants:
+Segments whose exclusive glyphs moved to `InitialFont::glyph_keyed_glyphs_` remain active if they still appear in target glyph conditions (e.g. `s_a..s_z` in `(s_a AND s_smcp)`). Expanding `AllPairsMerger` to merge these segments avoids leaving dozens of 1-glyph feature/ligature patches unmerged, while preserving two invariants:
 
 * **Partitioned pairwise candidate generation**: Active segments in `AllPairsMerger` (`s < optimization_cutoff_segment_` with `!TriggeringSegmentToConditions(s).empty()`) are partitioned into two probability-ordered sets:
   1. `active_segments_by_prob_`: segments with `!ExclusiveGlyphs(s).empty()` (paired with each other as today, preserving `BestCaseInertProbabilityThreshold` pruning and Phase 2 `min_group_size` iteration).
@@ -102,20 +104,20 @@ Segments whose exclusive glyphs moved to `init_font_glyphs_` remain active if th
     * Update `Compiler::CutSubset`, `GenerateBaseGvar`, `GenerateBaseCff2`, and add an outline-only `hb_subset` helper (`HB_SUBSET_FLAGS_NO_LAYOUT_CLOSURE | HB_SUBSET_FLAGS_RETAIN_GIDS | HB_SUBSET_FLAGS_RETAIN_NUM_GLYPHS`, dropping `cmap`/`GSUB`/`GPOS`/`GDEF`/`MATH`/`COLR`/`VARC`) to extract `glyf`/`loca` (+ `head.indexToLocFormat` sync), `gvar`, and `CFF ` when `IsMixedMode() && init_glyphs_.has_value()`, while non-outline tables continue using `hb_subset` closure on `node_subset`.
     * Add unit and Fontations client integration tests covering `glyf`, `gvar`, `CFF `, and `CFF2` where `'f'` and `'i'` are in `initial_codepoints` and `gid('f')`, `gid('i')` are in `initial_glyphs`, verifying that `gid('fi')` is excluded from the initial font's outline tables and loaded on demand via `IFTX` when extending to `"fi"`, while `"f"` requires 0 glyph-keyed and 0 table-keyed patches.
 
-- [ ] **Commit 2: Split frozen `closure_init_subset_` from moved `init_font_glyphs_` / `effective_init_font_segment_` and unify empty glyph handling.**
-  * **Files**: `ift/encoder/requested_segmentation_information.{h,cc}`, `ift/encoder/requested_segmentation_information_test.cc`, `ift/encoder/segmentation_context.{h,cc}`, `ift/encoder/glyph_groupings.{h,cc}`, `ift/encoder/closure_glyph_segmenter_test.cc`.
+- [x] **Commit 2: Introduce `InitialFont` and split frozen `closed_input_definition_` from mutable table-keyed/glyph-keyed sets.**
+  * **Files**: `ift/encoder/initial_font.{h,cc}`, `ift/encoder/requested_segmentation_information.{h,cc}`, `ift/encoder/requested_segmentation_information_test.cc`, `ift/encoder/segmentation_context.{h,cc}`, `ift/encoder/glyph_groupings.cc`, `ift/encoder/glyph_segmentation.cc`, `ift/dep_graph/dependency_graph.cc`, `ift/encoder/dependency_closure.{h,cc}`, `ift/encoder/glyph_closure_cache.cc`, `ift/encoder/closure_glyph_segmenter_test.cc`, `ift/encoder/BUILD`, `docs/init_font_handling.md`.
   * **Changes**:
-    * Refactor `RequestedSegmentationInformation` to freeze `closure_init_subset_` at creation time (used by `DependencyGraph`, `DependencyClosure`, and `GlyphClosureCache::ComputeExceptSegment`), while maintaining mutable `init_font_glyphs_` (`MoveGlyphsToInitFont`) and `effective_init_font_segment_` (`AddToInitFontSegment`, `ClearUnusedInitSegments`) without running `ExpandClosure`.
-    * Update `SegmentationContext::WithSameSettings` so `ValidateIncrementalGroupings` preserves both `closure_init_subset_`, `effective_init_font_segment_`, and `init_font_glyphs_`.
-    * Move initial `AlwaysTrueGlyphs()` and (in `IFT` mode) `FontHelper::EmptyGlyphs` into `init_font_glyphs_` via `MoveGlyphsToInitFont`, remove `NonInitFontNonEmptyGlyphs()` / `empty_glyphs_`, and simplify `SegmentationContext::TargetGlyphs()` to `NonInitFontGlyphs()`.
-    * Update `RequestedSegmentationInformationTest` and empty-glyph assertions in `ClosureGlyphSegmenterTest`.
+    * Extract [`InitialFont`](../ift/encoder/initial_font.h) held as `init_font_` on `RequestedSegmentationInformation`, encapsulating `closed_input_definition_`, `unsegmented_definition_`, `table_keyed_codepoints_`, `table_keyed_features_`, and `glyph_keyed_glyphs_`, plus `NonClosedInputGlyphs()` (used by `DependencyGraph`, `DependencyClosure`, `GlyphClosureCache::SegmentClosure`, and `ComputeExceptSegment`) alongside mutable non-closured moves (`MoveGlyphsToInitFont`, `AddToInitFontSegment`, `ClearUnusedInitSegments`, `ReplayInitFontMoves`) and existing empty-glyph handling (`NonInitFontNonEmptyGlyphs()`, `InitFontMoveTargetGlyphs()`, `ExcludeEmptyGlyphs()`).
+    * Update `SegmentationContext::WithSameSettings` so `ValidateIncrementalGroupings` preserves `InitialFont` state via `ReplayInitFontMoves`.
+    * Add `SegmentationContext::{MoveGlyphsToInitFont,AddToInitFontSegment,ClearUnusedInitSegments}`, switch initial `AlwaysTrueGlyphs()` handling to `MoveGlyphsToInitFont`, and emit `InitialFontGlyphClosure()` in `GlyphSegmentation::ToSegmentationPlanProto()`.
+    * Add unit tests in `RequestedSegmentationInformationTest` and `ClosureGlyphSegmenterTest`, and update `AlwaysTrueGlyphs_InitialSegmentMovedToInitFont` for `InitialFontSegment().gids` vs `InitialFontGlyphClosure()` / `plan.initial_glyphs()`.
 
 - [ ] **Commit 3: Rework `MoveSegmentsToInitFont` and `CandidateMerge` init-font cost delta to move patches and eligible segments without closure expansion.**
   * **Files**: `ift/encoder/candidate_merge.{h,cc}`, `ift/encoder/candidate_merge_test.cc`, `ift/encoder/merger.{h,cc}`, `ift/encoder/segmentation_context.{h,cc}`, `ift/encoder/glyph_groupings.{h,cc}`, `ift/encoder/closure_glyph_segmenter.cc`, `ift/encoder/closure_glyph_segmenter_test.cc`.
   * **Changes**:
     * Simplify `CandidateMerge::ComputeBestCaseInitFontCostDelta` and `CandidateMerge::ComputeInitFontCostDelta` to evaluate single-patch removal (`init_increase - P_m(c) * (size(G) + k)`) without `ComputeInitFontGlyphDelta` / `ExpandClosure` or cross-patch condition rewriting.
     * Update `Merger::ApplyInitFontMove` / `SegmentationContext` to remove moved `glyphs` directly from `NonInitFontGlyphs()`, `GlyphConditionSet`, and `GlyphGroupings` (and refresh `inert_segments_`) without calling `DependencyClosure::InitFontChanged`.
-    * After patch moves for opted-in profiles, promote segments in `InitFontApplyProbabilityThreshold(profile_index)` that appear in the dependency-graph condition of at least one glyph in `init_font_glyphs_` into `effective_init_font_segment_` iff no remaining patch condition in `GlyphGroupings` is satisfied by `s` alone; clear moved segments that have `TriggeringSegmentToConditions(s).empty()`.
+    * After patch moves for opted-in profiles, promote segments in `InitFontApplyProbabilityThreshold(profile_index)` that appear in the dependency-graph condition of at least one glyph in `InitialFont::glyph_keyed_glyphs_` into `InitialFont::table_keyed_*` iff no remaining patch condition in `GlyphGroupings` is satisfied by `s` alone; clear moved segments that have `TriggeringSegmentToConditions(s).empty()`.
     * Update existing init-font merging tests and add unit tests verifying: (a) moving `'f'` leaves `'fi'` as `(s_f AND s_i)`, (b) moving both `'f'` and `'i'` moves both codepoints to `InitialFontSegment()` while keeping `s_f` and `s_i` active for `p_fi`, (c) shared unmoved disjunctive `(s_1 OR s_2)` glyphs prevent moving `s_1`/`s_2` to `InitialFontSegment()`, and (d) high-probability empty-glyph segments (e.g. `U+0020`) move to `InitialFontSegment()` while low-probability ones and `GPOS`-only optional features do not.
 
 - [ ] **Commit 4: Expand `AllPairsMerger` and composite candidate selection to support zero-exclusive-glyph segments.**

@@ -18,6 +18,7 @@
 #include "ift/dep_graph/pending_edge.h"
 #include "ift/dep_graph/traversal.h"
 #include "ift/dep_graph/unicode_edges.h"
+#include "ift/encoder/initial_font.h"
 #include "ift/encoder/requested_segmentation_information.h"
 #include "ift/encoder/segment.h"
 #include "ift/encoder/types.h"
@@ -41,6 +42,7 @@ using ift::common::make_hb_font;
 using ift::common::make_hb_set;
 using ift::common::SegmentSet;
 using ift::encoder::glyph_id_t;
+using ift::encoder::InitialFont;
 using ift::encoder::RequestedSegmentationInformation;
 using ift::encoder::Segment;
 using ift::encoder::segment_index_t;
@@ -196,15 +198,14 @@ class TraversalContext {
   }
 
   // Preloads all of the reached glyphs/unicodes/features sets to be those in
-  // the init font of segmentation_info.
+  // `init_font`.
   //
   // When context is enforced this will allow conjunctive edges that intersect
   // the initial font to be traversed.
-  void SetReachedToInitFont(
-      const RequestedSegmentationInformation& segmentation_info,
-      const flat_hash_set<hb_tag_t>& init_features) {
-    reached_glyphs_ = segmentation_info.InitFontGlyphs();
-    reached_unicodes_ = segmentation_info.InitFontSegment().codepoints;
+  void SetReachedToInitFont(const InitialFont& init_font,
+                            const flat_hash_set<hb_tag_t>& init_features) {
+    reached_glyphs_ = init_font.ClosedInputGlyphs();
+    reached_unicodes_ = init_font.ClosedInputDefinition().codepoints;
     reached_features_ = init_features;
   }
 
@@ -557,7 +558,7 @@ absl::Status DependencyGraph::HandleOutgoingEdges(
     TRYV(HandleFeatureOutgoingEdges(node.Id(), context));
   } else if (node.IsInitFont()) {
     TRYV(HandleSubsetDefinitionOutgoingEdges(
-        node, segmentation_info_->InitFontSegment(), context));
+        node, segmentation_info_->InitFont().ClosedInputDefinition(), context));
   }
   return absl::OkStatus();
 }
@@ -578,14 +579,15 @@ DependencyGraph::StronglyConnectedComponents(
   CodepointSet non_init_font_codepoints =
       segmentation_info_->FullCodepointClosure();
   non_init_font_codepoints.subtract(
-      segmentation_info_->InitFontSegment().codepoints);
+      segmentation_info_->InitFont().ClosedInputDefinition().codepoints);
 
   flat_hash_set<hb_tag_t> non_init_font_features = full_feature_set_;
-  for (hb_tag_t tag : segmentation_info_->InitFontSegment().feature_tags) {
+  for (hb_tag_t tag :
+       segmentation_info_->InitFont().ClosedInputDefinition().feature_tags) {
     non_init_font_features.erase(tag);
   }
 
-  GlyphSet non_init_font_glyphs = segmentation_info_->NonInitFontGlyphs();
+  GlyphSet non_init_font_glyphs = segmentation_info_->NonClosedInputGlyphs();
 
   TraversalContext<Callback> context;
   context.depend = dependency_graph_.get();
@@ -812,12 +814,12 @@ StatusOr<Traversal> DependencyGraph::ClosureTraversal(
   if (unicode_filter_ptr == nullptr) {
     non_init_font_codepoints = segmentation_info_->FullCodepointClosure();
     non_init_font_codepoints.subtract(
-        segmentation_info_->InitFontSegment().codepoints);
+        segmentation_info_->InitFont().ClosedInputDefinition().codepoints);
   }
 
   GlyphSet non_init_font_glyphs;
   if (glyph_filter_ptr == nullptr) {
-    non_init_font_glyphs = segmentation_info_->NonInitFontGlyphs();
+    non_init_font_glyphs = segmentation_info_->NonClosedInputGlyphs();
   }
 
   Traversal traversal_full;
@@ -851,7 +853,7 @@ StatusOr<Traversal> DependencyGraph::ClosureTraversal(
   base_context.enforce_context = (mode == ENFORCE_CONTEXT);
   base_context.callback.collect_context = (mode != NO_CONTEXT);
   if (mode == ENFORCE_CONTEXT) {
-    base_context.SetReachedToInitFont(*segmentation_info_,
+    base_context.SetReachedToInitFont(segmentation_info_->InitFont(),
                                       TRY(InitFontFeatureSet()));
   }
 
@@ -1153,15 +1155,18 @@ StatusOr<flat_hash_set<hb_tag_t>> DependencyGraph::FullFeatureSet(
   return out;
 }
 
+StatusOr<flat_hash_set<hb_tag_t>> DependencyGraph::InitFontFeatureSet() const {
+  return InitFeatureSet(segmentation_info_->InitFont(), original_face_.get());
+}
+
 StatusOr<flat_hash_set<hb_tag_t>> DependencyGraph::InitFeatureSet(
-    const RequestedSegmentationInformation* segmentation_info,
-    hb_face_t* face) {
+    const InitialFont& init_font, hb_face_t* face) {
   hb_subset_input_t* input = hb_subset_input_create_or_fail();
   if (!input) {
     return absl::InternalError("Failed to create subset input object.");
   }
 
-  segmentation_info->InitFontSegment().ConfigureInput(input, face);
+  init_font.ClosedInputDefinition().ConfigureInput(input, face);
   hb_set_t* features =
       hb_subset_input_set(input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
 
