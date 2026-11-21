@@ -2,7 +2,7 @@
 #define IFT_ENCODER_INITIAL_FONT_H_
 
 #include "absl/container/btree_set.h"
-#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "hb.h"
 #include "ift/common/int_set.h"
 #include "ift/encoder/glyph_closure_cache.h"
@@ -20,13 +20,12 @@ class InitialFont {
 
   bool operator==(const InitialFont& other) const = default;
 
-  // Expands closure of `input_definition`, verifies it is a superset of any
-  // previously assigned `closed_input_definition_` (returning
-  // InvalidArgumentError without modifying state otherwise), stores it as
-  // `closed_input_definition_`, and includes its codepoints, features, and
-  // glyphs in the unsegmented, table-keyed, and glyph-keyed initial font sets.
-  absl::Status ReassignClosedInput(GlyphClosureCache& closure_cache,
-                                   const SubsetDefinition& input_definition);
+  // Expands closure of `input_definition` and constructs an InitialFont with
+  // its codepoints, features, and glyphs included in the closed input,
+  // unsegmented, table-keyed, and glyph-keyed initial font sets.
+  static absl::StatusOr<InitialFont> Create(
+      GlyphClosureCache& closure_cache,
+      const SubsetDefinition& input_definition);
 
   // Unions `glyphs` into the glyph-keyed initial font glyph set without running
   // closure expansion.
@@ -113,7 +112,8 @@ class InitialFont {
   }
 
  private:
-  bool has_closed_input_ = false;
+  explicit InitialFont(SubsetDefinition closed_input);
+
   // Subset definition provided by the input configuration, includes glyph
   // closure. Used by dep graph.
   SubsetDefinition closed_input_definition_;
