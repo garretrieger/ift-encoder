@@ -230,39 +230,96 @@ TEST_F(DependencyClosureTest, ExtractAllGlyphInteractingSegments) {
 }
 
 TEST_F(DependencyClosureTest, ExtractAllGlyphConditions_InitFont) {
-  // Move 'f' to init font
+  Reconfigure(face.get(), WithDefaultFeatures(),
+              {
+                  /* 0 */ {{'a'}},
+                  /* 1 */ {{'f'}},
+                  /* 2 */ {{'i'}},
+              });
+  {
+    auto conditions = dependency_closure->AllGlyphConditions();
+    ASSERT_EQ(conditions.at(74 /* f */).ToString(), "if (s1) then p0");
+    ASSERT_EQ(conditions.at(77 /* i */).ToString(), "if (s2) then p0");
+    ASSERT_EQ(conditions.at(444 /* fi */).ToString(), "if (s1 AND s2) then p0");
+  }
+
+  // Move 'f' to init font while keeping overlapping segment definitions.
   Reconfigure(face.get(), WithDefaultFeatures({'f'}),
               {
                   /* 0 */ {{'a'}},
-                  /* 1 */ {{'i'}},
+                  /* 1 */ {{'f'}},
+                  /* 2 */ {{'i'}},
               });
+  {
+    auto conditions = dependency_closure->AllGlyphConditions();
+    // 'f' is in init font, so it's not in the result map.
+    EXPECT_FALSE(conditions.contains(74 /* f */));
+    // 'i' and 'fi' should now only depend on 'i' (s2).
+    EXPECT_EQ(conditions.at(77 /* i */).ToString(), "if (s2) then p0");
+    EXPECT_EQ(conditions.at(444 /* fi */).ToString(), "if (s2) then p0");
+  }
 
-  auto conditions = dependency_closure->AllGlyphConditions();
-
-  // 'f' is in init font, so it's not in the result map
-  ASSERT_FALSE(conditions.contains(74));
-
-  // i (gid 77) is in segment 1
-  ASSERT_EQ(conditions.at(77).ToString(), "if (s1) then p0");
+  // Move both 'f' and 'i' to init font.
+  Reconfigure(face.get(), WithDefaultFeatures({'f', 'i'}),
+              {
+                  /* 0 */ {{'a'}},
+                  /* 1 */ {{'f'}},
+                  /* 2 */ {{'i'}},
+              });
+  {
+    auto conditions = dependency_closure->AllGlyphConditions();
+    EXPECT_FALSE(conditions.contains(74 /* f */));
+    EXPECT_FALSE(conditions.contains(77 /* i */));
+    EXPECT_FALSE(conditions.contains(444 /* fi */));
+    EXPECT_EQ(conditions.at(69 /* a */).ToString(), "if (s0) then p0");
+  }
 }
 
 TEST_F(DependencyClosureTest, ExtractAllGlyphInteractingSegments_InitFont) {
+  Reconfigure(face.get(), WithDefaultFeatures(),
+              {
+                  /* 0 */ {{'b'}},
+                  /* 1 */ {{'f'}},
+                  /* 2 */ {{'i'}},
+              });
+  {
+    const auto& interacting = dependency_closure->AllGlyphInteractingSegments();
+    ASSERT_EQ(interacting.at(70 /* b */), (SegmentSet{0}));
+    ASSERT_EQ(interacting.at(74 /* f */), (SegmentSet{1}));
+    ASSERT_EQ(interacting.at(77 /* i */), (SegmentSet{2}));
+    ASSERT_EQ(interacting.at(444 /* fi */), (SegmentSet{1, 2}));
+  }
+
   // Move 'f' to init font.
   Reconfigure(face.get(), WithDefaultFeatures({'f'}),
               {
                   /* 0 */ {{'b'}},
                   /* 1 */ {{'i'}},
               });
+  {
+    const auto& interacting = dependency_closure->AllGlyphInteractingSegments();
+    // 'f' is in init font, so it's not in the result map.
+    EXPECT_FALSE(interacting.contains(74 /* f */));
+    EXPECT_EQ(interacting.at(70 /* b */), (SegmentSet{0}));
+    EXPECT_EQ(interacting.at(77 /* i */), (SegmentSet{1}));
+    // 'fi' now only depends on 'i' (s1) since 'f' is in the init font.
+    EXPECT_EQ(interacting.at(444 /* fi */), (SegmentSet{1}));
+  }
 
-  const auto& interacting = dependency_closure->AllGlyphInteractingSegments();
-
-  // 'f' is in init font, so it's not in the result map.
-  EXPECT_FALSE(interacting.contains(74 /* f */));
-
-  EXPECT_EQ(interacting.at(70 /* b */), (SegmentSet{0}));
-  EXPECT_EQ(interacting.at(77 /* i */), (SegmentSet{1}));
-  // 'fi' now only depends on 'i' (s1) since 'f' is in the init font.
-  EXPECT_EQ(interacting.at(444 /* fi */), (SegmentSet{1}));
+  // Move both 'f' and 'i' to init font with overlapping segment definitions.
+  Reconfigure(face.get(), WithDefaultFeatures({'f', 'i'}),
+              {
+                  /* 0 */ {{'b'}},
+                  /* 1 */ {{'f'}},
+                  /* 2 */ {{'i'}},
+              });
+  {
+    const auto& interacting = dependency_closure->AllGlyphInteractingSegments();
+    EXPECT_FALSE(interacting.contains(74 /* f */));
+    EXPECT_FALSE(interacting.contains(77 /* i */));
+    EXPECT_FALSE(interacting.contains(444 /* fi */));
+    EXPECT_EQ(interacting.at(70 /* b */), (SegmentSet{0}));
+  }
 }
 
 TEST_F(DependencyClosureTest, InertSegments) {
@@ -287,14 +344,29 @@ TEST_F(DependencyClosureTest, InertSegments) {
 }
 
 TEST_F(DependencyClosureTest, InertSegments_InitFont) {
+  Reconfigure(face.get(), WithDefaultFeatures(),
+              {
+                  /* 0 */ {{'a'}},
+                  /* 1 */ {{'f'}},
+                  /* 2 */ {{'i'}},
+              });
+  ASSERT_EQ(dependency_closure->InertSegments(), (SegmentSet{0}));
+
+  Reconfigure(face.get(), WithDefaultFeatures({'f'}),
+              {
+                  /* 0 */ {{'a'}},
+                  /* 1 */ {{'f'}},
+                  /* 2 */ {{'i'}},
+              });
+  EXPECT_EQ(dependency_closure->InertSegments(), (SegmentSet{0, 2}));
+
   Reconfigure(face.get(), WithDefaultFeatures({'f'}),
               {
                   /* 0 */ {{'a'}},
                   /* 1 */ {{'b'}},
                   /* 2 */ {{'i'}},
               });
-
-  ASSERT_EQ(dependency_closure->InertSegments(), (SegmentSet{0, 1, 2}));
+  EXPECT_EQ(dependency_closure->InertSegments(), (SegmentSet{0, 1, 2}));
 }
 
 TEST_F(DependencyClosureTest, ExtractAllGlyphConditions_Composite) {
@@ -834,11 +906,10 @@ TEST_F(DependencyClosureTest, SegmentsChanged) {
   s = CompareAnalysis({1});
   ASSERT_TRUE(s.ok()) << s;
 
-  s = segmentation_info->ReassignInitSubset(*closure_cache, {'a'});
-  ASSERT_TRUE(s.ok()) << s;
-
-  s = dependency_closure->InitFontChanged(SegmentSet::all());
-  ASSERT_TRUE(s.ok()) << s;
+  Reconfigure({'a'}, {
+                         {{'a'}},
+                         {{'b'}},
+                     });
 
   s = CompareAnalysis({0});
   ASSERT_TRUE(s.ok()) << s;
@@ -1008,81 +1079,6 @@ TEST_F(DependencyClosureTest, SegmentsMerged_InertSegments) {
   ASSERT_EQ(dependency_closure->InertSegments(), (SegmentSet{0, 2}));
 }
 
-TEST_F(DependencyClosureTest, InitFontChanged_GlyphConditionsUpdate) {
-  Reconfigure(face.get(), WithDefaultFeatures(),
-              {
-                  /* 0 */ {{'a'}},
-                  /* 1 */ {{'f'}},
-                  /* 2 */ {{'i'}},
-              });
-
-  auto conditions = dependency_closure->AllGlyphConditions();
-  ASSERT_TRUE(conditions.contains(74 /* f */));
-
-  Status s = segmentation_info->ReassignInitSubset(*closure_cache,
-                                                   WithDefaultFeatures({'f'}));
-  ASSERT_TRUE(s.ok()) << s;
-
-  s = dependency_closure->InitFontChanged(SegmentSet::all());
-  ASSERT_TRUE(s.ok()) << s;
-
-  conditions = dependency_closure->AllGlyphConditions();
-  // 'f' should no longer be in conditions
-  EXPECT_FALSE(conditions.contains(74 /* f */));
-  // 'fi' should now only depend on 'i' (s2)
-  EXPECT_EQ(conditions.at(444 /* fi */).ToString(), "if (s2) then p0");
-}
-
-TEST_F(DependencyClosureTest, InitFontChanged_GlyphInteractingSegmentsUpdate) {
-  Reconfigure(face.get(), WithDefaultFeatures(),
-              {
-                  /* 0 */ {{'b'}},
-                  /* 1 */ {{'f'}},
-                  /* 2 */ {{'i'}},
-              });
-
-  {
-    const auto& interacting =
-        dependency_closure->AllGlyphInteractingSegments();
-    ASSERT_EQ(interacting.at(70 /* b */), (SegmentSet{0}));
-    ASSERT_EQ(interacting.at(74 /* f */), (SegmentSet{1}));
-    ASSERT_EQ(interacting.at(77 /* i */), (SegmentSet{2}));
-    ASSERT_EQ(interacting.at(444 /* fi */), (SegmentSet{1, 2}));
-  }
-
-  Status s = segmentation_info->ReassignInitSubset(*closure_cache,
-                                                   WithDefaultFeatures({'f'}));
-  ASSERT_TRUE(s.ok()) << s;
-
-  s = dependency_closure->InitFontChanged({1});
-  ASSERT_TRUE(s.ok()) << s;
-
-  {
-    const auto& interacting =
-        dependency_closure->AllGlyphInteractingSegments();
-    EXPECT_FALSE(interacting.contains(74 /* f */));
-    EXPECT_EQ(interacting.at(444 /* fi */), (SegmentSet{2}));
-    EXPECT_EQ(interacting.at(77 /* i */), (SegmentSet{2}));
-    EXPECT_EQ(interacting.at(70 /* b */), (SegmentSet{0}));
-  }
-
-  s = segmentation_info->ReassignInitSubset(*closure_cache,
-                                            WithDefaultFeatures({'f', 'i'}));
-  ASSERT_TRUE(s.ok()) << s;
-
-  s = dependency_closure->InitFontChanged({2});
-  ASSERT_TRUE(s.ok()) << s;
-
-  {
-    const auto& interacting =
-        dependency_closure->AllGlyphInteractingSegments();
-    EXPECT_FALSE(interacting.contains(74 /* f */));
-    EXPECT_FALSE(interacting.contains(77 /* i */));
-    EXPECT_FALSE(interacting.contains(444 /* fi */));
-    EXPECT_EQ(interacting.at(70 /* b */), (SegmentSet{0}));
-  }
-}
-
 TEST_F(DependencyClosureTest, SegmentsReset_GlyphInteractingSegmentsUpdate) {
   Reconfigure(face.get(), WithDefaultFeatures(),
               {
@@ -1116,26 +1112,6 @@ TEST_F(DependencyClosureTest, SegmentsReset_GlyphInteractingSegmentsUpdate) {
   EXPECT_EQ(interacting.at(910 /* Alpha */), (SegmentSet{1}));
   EXPECT_EQ(interacting.at(70 /* b */), (SegmentSet{2}));
   EXPECT_EQ(interacting.at(37 /* A */), (SegmentSet{1, 3}));
-}
-
-TEST_F(DependencyClosureTest, InitFontChanged_InertSegments) {
-  Reconfigure(face.get(), WithDefaultFeatures(),
-              {
-                  /* 0 */ {{'a'}},
-                  /* 1 */ {{'f'}},
-                  /* 2 */ {{'i'}},
-              });
-
-  ASSERT_EQ(dependency_closure->InertSegments(), (SegmentSet{0}));
-
-  Status s = segmentation_info->ReassignInitSubset(*closure_cache,
-                                                   WithDefaultFeatures({'f'}));
-  ASSERT_TRUE(s.ok()) << s;
-
-  s = dependency_closure->InitFontChanged(SegmentSet::all());
-  ASSERT_TRUE(s.ok()) << s;
-
-  ASSERT_EQ(dependency_closure->InertSegments(), (SegmentSet{0, 2}));
 }
 
 TEST_F(DependencyClosureTest, SegmentsThatInteractWith_Nodes) {
@@ -1400,72 +1376,32 @@ TEST_F(DependencyClosureTest, SegmentsToAffected) {
                                         Node::Glyph(446)}));
 }
 
-TEST_F(DependencyClosureTest, InitFontChanged_Caching) {
-  Reconfigure(WithDefaultFeatures(),
-              {
-                  /* 0 */ {{'a'}},
-                  /* 1 */ {{'f'}},
-                  /* 2 */ {{'i'}},
-              });
+TEST_F(DependencyClosureTest, SegmentsMerged_NonDisjoint_PreservesBidiEdges) {
+  Reconfigure(WithDefaultFeatures({'b'}), {
+                                              /* 0 */ {{'a', '('}},
+                                              /* 1 */ {{'a'}},
+                                              /* 2 */ {{')'}},
+                                          });
 
+  ASSERT_FALSE(segmentation_info->SegmentsAreDisjoint());
   auto conditions1 = dependency_closure->AllGlyphConditions();
-  ASSERT_EQ(conditions1.at(74 /* f */).ToString(), "if (s1) then p0");
+  ASSERT_FALSE(conditions1.contains(70 /* b */));
+  ASSERT_EQ(conditions1.at(69 /* a */).ToString(), "if ((s0 OR s1)) then p0");
+  ASSERT_EQ(conditions1.at(12 /* ( */).ToString(), "if ((s0 OR s2)) then p0");
+  ASSERT_EQ(conditions1.at(13 /* ) */).ToString(), "if ((s0 OR s2)) then p0");
 
-  // Change init font to include 'f'
-  Status s = segmentation_info->ReassignInitSubset(*closure_cache,
-                                                   WithDefaultFeatures({'f'}));
-  ASSERT_TRUE(s.ok()) << s;
-
-  s = dependency_closure->InitFontChanged(SegmentSet::all());
+  // Non-disjoint SegmentsMerged recomputes reachable phase-0 incoming edges
+  // and must preserve bidi edges between '(' and ')'.
+  segmentation_info->AssignMergedSegment(0, {1},
+                                         Segment(SubsetDefinition{'a', '('}));
+  Status s = dependency_closure->SegmentsMerged(0, {0, 1});
   ASSERT_TRUE(s.ok()) << s;
 
   auto conditions2 = dependency_closure->AllGlyphConditions();
-  // 'f' should now be in init font, so not in conditions
-  ASSERT_FALSE(conditions2.contains(74 /* f */));
-  ASSERT_EQ(conditions2.at(77 /* i */).ToString(), "if (s2) then p0");
-
-  // Change init font again to add 'i'
-  s = segmentation_info->ReassignInitSubset(*closure_cache,
-                                            WithDefaultFeatures({'f', 'i'}));
-  ASSERT_TRUE(s.ok()) << s;
-
-  s = dependency_closure->InitFontChanged(SegmentSet::all());
-  ASSERT_TRUE(s.ok()) << s;
-
-  auto conditions3 = dependency_closure->AllGlyphConditions();
-  ASSERT_FALSE(conditions3.contains(74 /* f */));
-  ASSERT_FALSE(conditions3.contains(77 /* i */));
-  ASSERT_FALSE(conditions3.contains(
-      444 /* fi */));  // now that f, i are in init font so should fi
-  ASSERT_EQ(conditions3.at(69 /* a */).ToString(), "if (s0) then p0");
-}
-
-TEST_F(DependencyClosureTest, InitFontChanged_PreservesBidiEdges) {
-  Reconfigure(WithDefaultFeatures(),
-              {
-                  /* 0 */ {{'a'}},
-                  /* 1 */ {{'('}},
-                  /* 2 */ {{')'}},
-              });
-
-  auto conditions1 = dependency_closure->AllGlyphConditions();
-  ASSERT_EQ(conditions1.at(69 /* a */).ToString(), "if (s0) then p0");
-  ASSERT_EQ(conditions1.at(12 /* ( */).ToString(), "if ((s1 OR s2)) then p0");
-  ASSERT_EQ(conditions1.at(13 /* ) */).ToString(), "if ((s1 OR s2)) then p0");
-
-  // Change init font to include 'a' (partial update on Init phase must
-  // preserve bidi edges between '(' and ')').
-  Status s = segmentation_info->ReassignInitSubset(*closure_cache,
-                                                   WithDefaultFeatures({'a'}));
-  ASSERT_TRUE(s.ok()) << s;
-
-  s = dependency_closure->InitFontChanged(SegmentSet::all());
-  ASSERT_TRUE(s.ok()) << s;
-
-  auto conditions2 = dependency_closure->AllGlyphConditions();
-  ASSERT_FALSE(conditions2.contains(69 /* a */));
-  EXPECT_EQ(conditions2.at(12 /* ( */).ToString(), "if ((s1 OR s2)) then p0");
-  EXPECT_EQ(conditions2.at(13 /* ) */).ToString(), "if ((s1 OR s2)) then p0");
+  ASSERT_FALSE(conditions2.contains(70 /* b */));
+  EXPECT_EQ(conditions2.at(69 /* a */).ToString(), "if (s0) then p0");
+  EXPECT_EQ(conditions2.at(12 /* ( */).ToString(), "if ((s0 OR s2)) then p0");
+  EXPECT_EQ(conditions2.at(13 /* ) */).ToString(), "if ((s0 OR s2)) then p0");
 }
 
 TEST_F(DependencyClosureTest, AlwaysTrueGlyphs_NestedContextOverApproximation) {
@@ -1510,13 +1446,13 @@ TEST_F(DependencyClosureTest, PostGsubMathClosure) {
   s = CompareAnalysis({1});
   EXPECT_TRUE(s.ok()) << s;
 
-  // Move uni222B into the init font and verify post-GSUB MATH glyphs move into
-  // the init font cleanly during incremental InitFontChanged updates.
-  s = segmentation_info->ReassignInitSubset(*closure_cache,
-                                            WithDefaultFeatures({0x222B}));
-  ASSERT_TRUE(s.ok()) << s;
-  s = dependency_closure->InitFontChanged(SegmentSet::all());
-  ASSERT_TRUE(s.ok()) << s;
+  // Put uni222B in the init font and verify post-GSUB MATH glyphs are covered
+  // by the init font.
+  Reconfigure(math_face.get(), WithDefaultFeatures({0x222B}),
+              {
+                  /* 0 */ {{0x222B}},  // uni222B
+                  /* 1 */ {{0x2044}},  // fraction
+              });
 
   auto updated = dependency_closure->AllGlyphConditions();
   EXPECT_FALSE(updated.contains(17 /* uni222B */));

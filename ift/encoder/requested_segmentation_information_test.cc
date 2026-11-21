@@ -2,9 +2,7 @@
 
 #include <vector>
 
-#include "absl/status/status.h"
 #include "gtest/gtest.h"
-#include "ift/common/axis_range.h"
 #include "ift/common/bazel_data_file_resolver.h"
 #include "ift/common/font_data.h"
 #include "ift/common/font_helper.h"
@@ -90,7 +88,8 @@ TEST_F(RequestedSegmentationInformationTest, IndexUpdatesOnMerge) {
   EXPECT_EQ(info->SegmentsForCodepoints({'c'}), (SegmentSet{2}));
 }
 
-TEST_F(RequestedSegmentationInformationTest, IndexUpdatesOnReassignInit) {
+TEST_F(RequestedSegmentationInformationTest,
+       InitSubsetCodepointsRemovedFromSegmentsAndIndex) {
   std::unique_ptr<GlyphClosureCache> cache =
       *GlyphClosureCache::Create(roboto.get(), *resolver);
   std::vector<Segment> segments{
@@ -98,23 +97,55 @@ TEST_F(RequestedSegmentationInformationTest, IndexUpdatesOnReassignInit) {
       {{'b', 'c'}},
   };
 
-  auto info_or = RequestedSegmentationInformation::Create(segments, {}, *cache);
-  ASSERT_TRUE(info_or.ok());
-  auto& info = *info_or;
+  {
+    auto info_or =
+        RequestedSegmentationInformation::Create(segments, {}, *cache);
+    ASSERT_TRUE(info_or.ok()) << info_or.status();
+    const auto& info = *info_or;
 
-  EXPECT_EQ(info->SegmentsForCodepoints({'a'}), (SegmentSet{0}));
-  EXPECT_EQ(info->SegmentsForCodepoints({'b'}), (SegmentSet{0, 1}));
-  EXPECT_EQ(info->SegmentsForCodepoints({'c'}), (SegmentSet{1}));
+    EXPECT_EQ(info->SegmentsForCodepoints({'a'}), (SegmentSet{0}));
+    EXPECT_EQ(info->SegmentsForCodepoints({'b'}), (SegmentSet{0, 1}));
+    EXPECT_EQ(info->SegmentsForCodepoints({'c'}), (SegmentSet{1}));
+  }
 
-  // Reassign init subset to include 'b'. This should remove 'b' from all
-  // segments.
-  SubsetDefinition new_init;
-  new_init.codepoints = {'b'};
-  ASSERT_TRUE(info->ReassignInitSubset(*cache, new_init).ok());
+  // Initial subset including 'b' removes 'b' from all segments and the index.
+  {
+    SubsetDefinition init;
+    init.codepoints = {'b'};
+    auto info_or =
+        RequestedSegmentationInformation::Create(segments, init, *cache);
+    ASSERT_TRUE(info_or.ok()) << info_or.status();
+    const auto& info = *info_or;
 
-  EXPECT_EQ(info->SegmentsForCodepoints({'a'}), (SegmentSet{0}));
-  EXPECT_EQ(info->SegmentsForCodepoints({'b'}), (SegmentSet{}));
-  EXPECT_EQ(info->SegmentsForCodepoints({'c'}), (SegmentSet{1}));
+    EXPECT_EQ(info->SegmentsForCodepoints({'a'}), (SegmentSet{0}));
+    EXPECT_EQ(info->SegmentsForCodepoints({'b'}), (SegmentSet{}));
+    EXPECT_EQ(info->SegmentsForCodepoints({'c'}), (SegmentSet{1}));
+    EXPECT_EQ(info->Segments().at(0).Definition().codepoints,
+              (CodepointSet{'a'}));
+    EXPECT_EQ(info->Segments().at(1).Definition().codepoints,
+              (CodepointSet{'c'}));
+  }
+
+  // Closure-implied codepoints in init (gid_b -> 'b') are also removed from
+  // segments and the index.
+  {
+    auto gid_b =
+        ift::common::FontHelper::GetNominalGlyph(roboto.get(), 'b').value();
+    SubsetDefinition init;
+    init.gids = {gid_b};
+    auto info_or =
+        RequestedSegmentationInformation::Create(segments, init, *cache);
+    ASSERT_TRUE(info_or.ok()) << info_or.status();
+    const auto& info = *info_or;
+
+    EXPECT_EQ(info->SegmentsForCodepoints({'a'}), (SegmentSet{0}));
+    EXPECT_EQ(info->SegmentsForCodepoints({'b'}), (SegmentSet{}));
+    EXPECT_EQ(info->SegmentsForCodepoints({'c'}), (SegmentSet{1}));
+    EXPECT_EQ(info->Segments().at(0).Definition().codepoints,
+              (CodepointSet{'a'}));
+    EXPECT_EQ(info->Segments().at(1).Definition().codepoints,
+              (CodepointSet{'c'}));
+  }
 }
 
 TEST_F(RequestedSegmentationInformationTest, NonInitFontNonEmptyGlyphs_Glyf) {
@@ -134,12 +165,17 @@ TEST_F(RequestedSegmentationInformationTest, NonInitFontNonEmptyGlyphs_Glyf) {
   EXPECT_EQ(info->NonInitFontGlyphs(), (ift::common::GlyphSet{4, 69, 70}));
   EXPECT_EQ(info->NonInitFontNonEmptyGlyphs(), (ift::common::GlyphSet{69, 70}));
 
-  // Moving 'a' into the init font removes gid 69 from both sets.
-  SubsetDefinition new_init;
-  new_init.codepoints = {'a'};
-  ASSERT_TRUE(info->ReassignInitSubset(*cache, new_init).ok());
-  EXPECT_EQ(info->NonInitFontGlyphs(), (ift::common::GlyphSet{4, 70}));
-  EXPECT_EQ(info->NonInitFontNonEmptyGlyphs(), (ift::common::GlyphSet{70}));
+  // Including 'a' in the init font removes gid 69 from both sets.
+  SubsetDefinition init_with_a;
+  init_with_a.codepoints = {'a'};
+  auto info_with_a_or =
+      RequestedSegmentationInformation::Create(segments, init_with_a, *cache);
+  ASSERT_TRUE(info_with_a_or.ok()) << info_with_a_or.status();
+  auto& info_with_a = *info_with_a_or;
+
+  EXPECT_EQ(info_with_a->NonInitFontGlyphs(), (ift::common::GlyphSet{4, 70}));
+  EXPECT_EQ(info_with_a->NonInitFontNonEmptyGlyphs(),
+            (ift::common::GlyphSet{70}));
 }
 
 TEST_F(RequestedSegmentationInformationTest,
@@ -326,109 +362,6 @@ TEST_F(RequestedSegmentationInformationTest,
   EXPECT_EQ(replayed->NonInitFontNonEmptyGlyphs(),
             info->NonInitFontNonEmptyGlyphs());
   EXPECT_EQ(replayed->NonClosedInputGlyphs(), info->NonClosedInputGlyphs());
-}
-
-TEST_F(RequestedSegmentationInformationTest,
-       ReassignClosedInputRequiresSupersetAfterClosure) {
-  {
-    std::unique_ptr<GlyphClosureCache> cache =
-        *GlyphClosureCache::Create(roboto.get(), *resolver);
-    SubsetDefinition init({'a'});
-    init.feature_tags.insert(HB_TAG('s', 'm', 'c', 'p'));
-    init.gids.insert(444);  // unencoded 'fi' ligature in Roboto-Regular.ttf
-    auto info_or = RequestedSegmentationInformation::Create({}, init, *cache);
-    ASSERT_TRUE(info_or.ok()) << info_or.status();
-    auto& info = *info_or;
-
-    auto gid_a =
-        ift::common::FontHelper::GetNominalGlyph(roboto.get(), 'a').value();
-    auto gid_b =
-        ift::common::FontHelper::GetNominalGlyph(roboto.get(), 'b').value();
-
-    // Closure-implied superset succeeds: passing {gid_a, gid_b, 'c'} plus
-    // smcp, dlig, and gid 444 reverse-maps gid_a -> 'a' and gid_b -> 'b' in
-    // ExpandClosure.
-    SubsetDefinition closure_superset({'c'});
-    closure_superset.gids = {gid_a, gid_b, 444};
-    closure_superset.feature_tags = {HB_TAG('s', 'm', 'c', 'p'),
-                                     HB_TAG('d', 'l', 'i', 'g')};
-    EXPECT_TRUE(info->ReassignInitSubset(*cache, closure_superset).ok());
-    EXPECT_TRUE(
-        info->InitFont().ClosedInputDefinition().codepoints.contains('a'));
-    EXPECT_TRUE(
-        info->InitFont().ClosedInputDefinition().codepoints.contains('b'));
-    EXPECT_TRUE(
-        info->InitFont().ClosedInputDefinition().codepoints.contains('c'));
-
-    const InitialFont before_failures = info->InitFont();
-
-    // Missing codepoint ('b') fails and leaves state unchanged.
-    SubsetDefinition missing_cp({'a', 'c'});
-    missing_cp.gids = {444};
-    missing_cp.feature_tags = {HB_TAG('s', 'm', 'c', 'p'),
-                               HB_TAG('d', 'l', 'i', 'g')};
-    EXPECT_TRUE(
-        absl::IsInvalidArgument(info->ReassignInitSubset(*cache, missing_cp)));
-    EXPECT_EQ(info->InitFont(), before_failures);
-
-    // Missing feature ('smcp') fails and leaves state unchanged.
-    SubsetDefinition missing_feature({'a', 'b', 'c'});
-    missing_feature.gids = {444};
-    missing_feature.feature_tags = {HB_TAG('d', 'l', 'i', 'g')};
-    EXPECT_TRUE(absl::IsInvalidArgument(
-        info->ReassignInitSubset(*cache, missing_feature)));
-    EXPECT_EQ(info->InitFont(), before_failures);
-
-    // Missing unencoded glyph (444) fails and leaves state unchanged.
-    SubsetDefinition missing_gid({'a', 'b', 'c'});
-    missing_gid.feature_tags = {HB_TAG('s', 'm', 'c', 'p'),
-                                HB_TAG('d', 'l', 'i', 'g')};
-    EXPECT_TRUE(
-        absl::IsInvalidArgument(info->ReassignInitSubset(*cache, missing_gid)));
-    EXPECT_EQ(info->InitFont(), before_failures);
-  }
-
-  {
-    hb_face_unique_ptr roboto_vf =
-        from_file("ift/common/testdata/Roboto[wdth,wght].ttf");
-    std::unique_ptr<GlyphClosureCache> cache =
-        *GlyphClosureCache::Create(roboto_vf.get(), *resolver);
-    SubsetDefinition init({'a'});
-    init.design_space[HB_TAG('w', 'g', 'h', 't')] =
-        *ift::common::AxisRange::Range(400.0f, 700.0f);
-    auto info_or = RequestedSegmentationInformation::Create({}, init, *cache);
-    ASSERT_TRUE(info_or.ok()) << info_or.status();
-    auto& info = *info_or;
-    const InitialFont before_failures = info->InitFont();
-
-    // Narrowing wght range fails and leaves state unchanged.
-    SubsetDefinition narrowed({'a'});
-    narrowed.design_space[HB_TAG('w', 'g', 'h', 't')] =
-        *ift::common::AxisRange::Range(400.0f, 600.0f);
-    EXPECT_TRUE(
-        absl::IsInvalidArgument(info->ReassignInitSubset(*cache, narrowed)));
-    EXPECT_EQ(info->InitFont(), before_failures);
-
-    // Restricting a previously unrestricted axis (wdth) fails.
-    SubsetDefinition restricted_wdth({'a'});
-    restricted_wdth.design_space[HB_TAG('w', 'g', 'h', 't')] =
-        *ift::common::AxisRange::Range(400.0f, 700.0f);
-    restricted_wdth.design_space[HB_TAG('w', 'd', 't', 'h')] =
-        *ift::common::AxisRange::Range(75.0f, 100.0f);
-    EXPECT_TRUE(absl::IsInvalidArgument(
-        info->ReassignInitSubset(*cache, restricted_wdth)));
-    EXPECT_EQ(info->InitFont(), before_failures);
-
-    // Widening wght range succeeds.
-    SubsetDefinition widened({'a', 'b'});
-    widened.design_space[HB_TAG('w', 'g', 'h', 't')] =
-        *ift::common::AxisRange::Range(300.0f, 800.0f);
-    EXPECT_TRUE(info->ReassignInitSubset(*cache, widened).ok());
-
-    // Dropping the wght restriction (full unrestricted axis) succeeds.
-    SubsetDefinition unrestricted({'a', 'b'});
-    EXPECT_TRUE(info->ReassignInitSubset(*cache, unrestricted).ok());
-  }
 }
 
 }  // namespace ift::encoder

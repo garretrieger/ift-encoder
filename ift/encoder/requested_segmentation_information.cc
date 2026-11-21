@@ -49,28 +49,21 @@ RequestedSegmentationInformation::Create(std::vector<Segment> segments,
                                          SubsetDefinition init_font_segment,
                                          GlyphClosureCache& closure_cache) {
   std::unique_ptr<RequestedSegmentationInformation> info(
-      new RequestedSegmentationInformation(segments, init_font_segment));
-  TRYV(info->ReassignInitSubset(closure_cache, init_font_segment));
-  info->segments_disjoint_ =
-      CheckSegmentsAreDisjoint(init_font_segment, info->segments_);
+      new RequestedSegmentationInformation());
+  TRYV(info->InitializeInitSubset(closure_cache, std::move(segments),
+                                  init_font_segment));
   return info;
-}
-
-RequestedSegmentationInformation::RequestedSegmentationInformation(
-    std::vector<Segment> segments, SubsetDefinition init_font_segment)
-    : segments_(std::move(segments)) {
-  // ReassignInitSubset expects full_definition_ is already populated.
-  full_definition_ = init_font_segment;
-  for (size_t i = 0; i < segments_.size(); ++i) {
-    full_definition_.Union(segments_[i].Definition());
-    AddToIndex(i, segments_[i].Definition().codepoints);
-  }
 }
 
 void RequestedSegmentationInformation::ResetSegments(
     std::vector<Segment> segments) {
-  segments_ = std::move(segments);
   init_font_.ResetClearedSegments();
+  PopulateSegments(std::move(segments));
+}
+
+void RequestedSegmentationInformation::PopulateSegments(
+    std::vector<Segment> segments) {
+  segments_ = std::move(segments);
   full_definition_ = init_font_.UnsegmentedDefinition();
   const CodepointSet& closed_init_codepoints =
       init_font_.ClosedInputDefinition().codepoints;
@@ -95,12 +88,11 @@ Status RequestedSegmentationInformation::RefreshClosures(
   non_closed_input_glyphs_ = full_closure_;
   non_closed_input_glyphs_.subtract(init_font_.ClosedInputGlyphs());
 
-  GlyphSet unchecked = non_closed_input_glyphs_;
-  unchecked.subtract(checked_empty_glyphs_);
-  if (!unchecked.empty()) {
-    empty_glyphs_.union_set(
-        TRY(FontHelper::EmptyGlyphs(closure_cache.OriginalFace(), unchecked)));
-    checked_empty_glyphs_.union_set(unchecked);
+  if (!non_closed_input_glyphs_.empty()) {
+    empty_glyphs_ = TRY(FontHelper::EmptyGlyphs(closure_cache.OriginalFace(),
+                                                non_closed_input_glyphs_));
+  } else {
+    empty_glyphs_.clear();
   }
 
   non_init_font_glyphs_ = full_closure_;
@@ -139,29 +131,12 @@ Status RequestedSegmentationInformation::ReplayInitFontMoves(
   return RefreshClosures(closure_cache);
 }
 
-Status RequestedSegmentationInformation::ReassignInitSubset(
-    GlyphClosureCache& closure_cache, const SubsetDefinition& new_def) {
-  // TODO XXXXX Can we avoid aggressively expanding the init closure?
-  // ie. run the init subsetting/closure operation purely in glyph form.
-  TRYV(init_font_.ReassignClosedInput(closure_cache, new_def));
-  const SubsetDefinition& closed_init = init_font_.ClosedInputDefinition();
-
-  full_definition_.Union(closed_init);
-  TRYV(RefreshClosures(closure_cache));
-
-  // Changing the init font subset may have caused additional codepoints to be
-  // moved to the init font. We need to update the segment definitions to
-  // remove these.
-  for (size_t i = 0; i < segments_.size(); ++i) {
-    auto& s = segments_[i];
-    if (s.Definition().codepoints.intersects(closed_init.codepoints)) {
-      CodepointSet intersection = s.Definition().codepoints;
-      intersection.intersect(closed_init.codepoints);
-      RemoveFromIndex(i, intersection);
-      s.Definition().codepoints.subtract(closed_init.codepoints);
-    }
-  }
-  return absl::OkStatus();
+Status RequestedSegmentationInformation::InitializeInitSubset(
+    GlyphClosureCache& closure_cache, std::vector<Segment> segments,
+    const SubsetDefinition& init_font_segment) {
+  init_font_ = TRY(InitialFont::Create(closure_cache, init_font_segment));
+  PopulateSegments(std::move(segments));
+  return RefreshClosures(closure_cache);
 }
 
 SegmentSet RequestedSegmentationInformation::SegmentsForCodepoints(

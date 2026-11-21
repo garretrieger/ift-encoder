@@ -26,8 +26,7 @@ class RequestedSegmentationInformation {
          GlyphClosureCache& closure_cache);
 
  private:
-  RequestedSegmentationInformation(std::vector<Segment> segments,
-                                   SubsetDefinition init_font_segment);
+  RequestedSegmentationInformation() = default;
 
  public:
   // Merge all of the segments in to_merge into base, assigned it
@@ -50,9 +49,6 @@ class RequestedSegmentationInformation {
   }
 
   void ResetSegments(std::vector<Segment> segments);
-
-  absl::Status ReassignInitSubset(GlyphClosureCache& closure_cache,
-                                  const SubsetDefinition& new_def);
 
   // Moves `glyphs` into the glyph-keyed initial font (removing them from
   // `non_init_font_glyphs_` and `non_init_font_non_empty_glyphs_`) without
@@ -154,6 +150,10 @@ class RequestedSegmentationInformation {
       const ift::common::CodepointSet& codepoints) const;
 
  private:
+  absl::Status InitializeInitSubset(GlyphClosureCache& closure_cache,
+                                    std::vector<Segment> segments,
+                                    const SubsetDefinition& init_font_segment);
+  void PopulateSegments(std::vector<Segment> segments);
   absl::Status RefreshClosures(GlyphClosureCache& closure_cache);
   void AddToIndex(segment_index_t seg_idx,
                   const ift::common::CodepointSet& codepoints);
@@ -165,7 +165,6 @@ class RequestedSegmentationInformation {
   SubsetDefinition full_definition_;
   ift::common::GlyphSet full_closure_;
   ift::common::CodepointSet full_codepoint_closure_;
-  ift::common::GlyphSet checked_empty_glyphs_;
   ift::common::GlyphSet empty_glyphs_;
   // Glyphs in `full_closure_` excluding `init_font_.ClosedInputGlyphs()`.
   ift::common::GlyphSet non_closed_input_glyphs_;
@@ -174,7 +173,7 @@ class RequestedSegmentationInformation {
   // `non_init_font_glyphs_` excluding empty outline glyphs.
   ift::common::GlyphSet non_init_font_non_empty_glyphs_;
 
-  bool segments_disjoint_;
+  bool segments_disjoint_ = true;
   absl::flat_hash_map<hb_codepoint_t, ift::common::SegmentSet>
       codepoint_to_segments_;
 };
