@@ -1543,8 +1543,8 @@ TEST_F(CompilerTest, MixedMode_StripsUnrecognizedTables) {
   auto encoded_face = encoding->init_font.face();
   EXPECT_FALSE(FontHelper::GetTags(encoded_face.get()).contains(kPfEd));
 
-  auto cut_init =
-      Compiler::CutMixedModeInitSubset(input_face.get(), SubsetDefinition{'a'});
+  auto cut_init = Compiler::CutMixedModeInitSubset(
+      input_face.get(), SubsetDefinition{'a'}, GlyphSet{0, 1});
   ASSERT_TRUE(cut_init.ok()) << cut_init.status();
   auto cut_face = cut_init->face();
   EXPECT_FALSE(FontHelper::GetTags(cut_face.get()).contains(kPfEd));

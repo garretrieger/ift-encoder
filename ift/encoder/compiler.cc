@@ -1213,7 +1213,8 @@ StatusOr<FontData> Compiler::RoundTripWoff2(string_view font,
 }
 
 StatusOr<FontData> Compiler::CutMixedModeInitSubset(
-    hb_face_t* face, const SubsetDefinition& init_subset) {
+    hb_face_t* face, const SubsetDefinition& init_subset,
+    const GlyphSet& init_glyphs) {
   if (!face) {
     return absl::InvalidArgumentError("Face must not be null.");
   }
@@ -1222,14 +1223,11 @@ StatusOr<FontData> Compiler::CutMixedModeInitSubset(
   compiler.SetFace(face);
   compiler.force_mixed_mode_ = true;
   TRYV(compiler.SetInitSubsetFromDef(init_subset));
+  TRYV(compiler.SetInitGlyphs(init_glyphs));
 
   ProcessingContext context(0);
   context.init_subset_ = init_subset;
   AddInitSubsetDefaults(context.init_subset_);
-  uint32_t gid_count = hb_face_get_glyph_count(face);
-  if (gid_count > 0) {
-    context.init_subset_.gids.insert(gid_count - 1);
-  }
   context.force_long_loca_and_gvar_ =
       TRY(FontHelper::HasLongLoca(face)) || FontHelper::HasWideGvar(face);
 

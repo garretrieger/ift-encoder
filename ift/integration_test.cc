@@ -1,23 +1,34 @@
 #include <cstdint>
+#include <filesystem>
+#include <optional>
 #include <string>
 
+#include "absl/container/btree_set.h"
 #include "absl/strings/str_cat.h"
+#include "codepoint_count.pb.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "hb.h"
 #include "ift/client/fontations_client.h"
 #include "ift/common/axis_range.h"
+#include "ift/common/bazel_data_file_resolver.h"
 #include "ift/common/font_data.h"
 #include "ift/common/font_helper.h"
 #include "ift/common/int_set.h"
 #include "ift/common/test_font_loader.h"
 #include "ift/common/try.h"
 #include "ift/common/woff2.h"
+#include "ift/config/config_compiler.h"
+#include "ift/config/segmentation_plan.pb.h"
+#include "ift/config/segmenter_config.pb.h"
+#include "ift/config/segmenter_config_util.h"
 #include "ift/encoder/compiler.h"
 #include "ift/encoder/subset_definition.h"
 #include "ift/proto/patch_encoding.h"
 #include "ift/proto/patch_map.h"
 #include "ift/testdata/test_segments.h"
+#include "riegeli/bytes/fd_writer.h"
+#include "riegeli/records/record_writer.h"
 
 using absl::btree_set;
 using absl::flat_hash_map;
@@ -2121,6 +2132,222 @@ TEST_F(IntegrationTest, MixedMode_SeparateInitGlyphs_Cff2) {
   auto extended_fi_face = extended_fi->face();
   EXPECT_EQ(FontHelper::Cff2Data(extended_fi_face.get(), 3).span(),
             FontHelper::Cff2Data(desubroutinized_face.get(), 3).span());
+}
+
+static uint32_t ShapeSingleGlyph(
+    hb_face_t* face, const char* text,
+    std::optional<hb_tag_t> feature_tag = std::nullopt) {
+  hb_font_t* font = hb_font_create(face);
+  hb_buffer_t* buffer = hb_buffer_create();
+  hb_buffer_add_utf8(buffer, text, -1, 0, -1);
+  hb_buffer_guess_segment_properties(buffer);
+
+  std::vector<hb_feature_t> features;
+  if (feature_tag.has_value()) {
+    features.push_back(hb_feature_t{
+        .tag = *feature_tag,
+        .value = 1,
+        .start = HB_FEATURE_GLOBAL_START,
+        .end = HB_FEATURE_GLOBAL_END,
+    });
+  }
+  hb_shape(font, buffer, features.data(), features.size());
+
+  unsigned int len = 0;
+  hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buffer, &len);
+  EXPECT_EQ(len, 1u) << "Expected single shaped glyph for " << text;
+  uint32_t gid = len > 0 ? infos[0].codepoint : 0;
+
+  hb_buffer_destroy(buffer);
+  hb_font_destroy(font);
+  return gid;
+}
+
+TEST_F(IntegrationTest,
+       EndToEnd_SegmenterToCompiler_MovedInitFontLigatureAndSmcp) {
+  std::filesystem::path freq_path =
+      std::filesystem::path(testing::TempDir()) / "e2e_init_font_freq.riegeli";
+  {
+    riegeli::RecordWriter writer{riegeli::FdWriter<>(freq_path.string())};
+    for (const auto& [cp, count] : std::vector<std::pair<uint32_t, uint64_t>>{
+             {0x20, 100},
+             {'a', 98},
+             {'b', 98},
+             {'c', 98},
+             {'f', 70},
+             {'i', 70},
+             {'z', 5},
+         }) {
+      ift_encoder_data::CodepointCount msg;
+      msg.add_codepoints(cp);
+      msg.add_codepoints(cp);
+      msg.set_count(count);
+      ASSERT_TRUE(writer.WriteRecord(msg)) << writer.status();
+    }
+    ASSERT_TRUE(writer.Close()) << writer.status();
+  }
+
+  auto orig_face = roboto_regular_.face();
+  constexpr hb_tag_t kSmcp = HB_TAG('s', 'm', 'c', 'p');
+  uint32_t gid_a = FontHelper::GetNominalGlyph(orig_face.get(), 'a').value();
+  uint32_t gid_b = FontHelper::GetNominalGlyph(orig_face.get(), 'b').value();
+  uint32_t gid_c = FontHelper::GetNominalGlyph(orig_face.get(), 'c').value();
+  uint32_t gid_f = FontHelper::GetNominalGlyph(orig_face.get(), 'f').value();
+  uint32_t gid_i = FontHelper::GetNominalGlyph(orig_face.get(), 'i').value();
+  uint32_t gid_z = FontHelper::GetNominalGlyph(orig_face.get(), 'z').value();
+  uint32_t gid_fi = ShapeSingleGlyph(orig_face.get(), "fi");
+  uint32_t gid_a_smcp = ShapeSingleGlyph(orig_face.get(), "a", kSmcp);
+  uint32_t gid_b_smcp = ShapeSingleGlyph(orig_face.get(), "b", kSmcp);
+  uint32_t gid_c_smcp = ShapeSingleGlyph(orig_face.get(), "c", kSmcp);
+  uint32_t gid_z_smcp = ShapeSingleGlyph(orig_face.get(), "z", kSmcp);
+
+  ift::config::SegmenterConfig config;
+  config.set_generate_table_keyed_segments_mode(ift::config::FROM_MERGE_GROUPS);
+  (*config.mutable_segments())[1].mutable_codepoints()->add_values('a');
+  (*config.mutable_segments())[2].mutable_codepoints()->add_values('b');
+  (*config.mutable_segments())[3].mutable_codepoints()->add_values('c');
+  (*config.mutable_segments())[4].mutable_codepoints()->add_values('f');
+  (*config.mutable_segments())[5].mutable_codepoints()->add_values('i');
+  (*config.mutable_segments())[6].mutable_codepoints()->add_values('z');
+  (*config.mutable_feature_segments())[1].add_values("smcp");
+
+  auto* group = config.add_merge_groups();
+  group->set_name("latin");
+  for (uint32_t id = 1; id <= 6; ++id) {
+    group->mutable_segment_ids()->add_values(id);
+  }
+  group->mutable_feature_segment_ids()->add_values(1);
+  auto* cost_config = group->mutable_cost_config();
+  cost_config->set_network_overhead_cost(75);
+  cost_config->set_min_group_size(1);
+  cost_config->set_optimization_cutoff_fraction(0.0);
+  auto* freq_cfg = cost_config->add_frequency_data();
+  freq_cfg->set_path_to_frequency_data(freq_path.string());
+  freq_cfg->set_use_bigrams(false);
+  freq_cfg->set_initial_font_merge_threshold(-65.0);
+
+  auto resolver = *ift::common::BazelDataFileResolver::CreateForTest();
+  ift::config::SegmenterConfigUtil util(freq_path.string(), resolver);
+  auto seg_result = util.RunSegmenter(orig_face.get(), config);
+  ASSERT_TRUE(seg_result.ok()) << seg_result.status();
+  const auto& plan = seg_result->plan;
+
+  IntSet init_codepoints;
+  init_codepoints.insert(plan.initial_codepoints().values().begin(),
+                         plan.initial_codepoints().values().end());
+  EXPECT_EQ(init_codepoints, (IntSet{'a', 'b', 'c', 'f', 'i'}));
+  EXPECT_EQ(plan.initial_features().values_size(), 0);
+
+  GlyphSet init_glyphs;
+  init_glyphs.insert(plan.initial_glyphs().values().begin(),
+                     plan.initial_glyphs().values().end());
+  EXPECT_TRUE(init_glyphs.contains(0));
+  EXPECT_TRUE(init_glyphs.contains(gid_a));
+  EXPECT_TRUE(init_glyphs.contains(gid_b));
+  EXPECT_TRUE(init_glyphs.contains(gid_c));
+  EXPECT_TRUE(init_glyphs.contains(gid_f));
+  EXPECT_TRUE(init_glyphs.contains(gid_i));
+  EXPECT_FALSE(init_glyphs.contains(gid_fi));
+  EXPECT_FALSE(init_glyphs.contains(gid_z));
+  EXPECT_FALSE(init_glyphs.contains(gid_a_smcp));
+  EXPECT_FALSE(init_glyphs.contains(gid_b_smcp));
+  EXPECT_FALSE(init_glyphs.contains(gid_c_smcp));
+
+  bool saw_consolidated_smcp_patch = false;
+  for (const auto& [patch_id, gids_proto] : plan.glyph_patches()) {
+    GlyphSet patch_gids;
+    patch_gids.insert(gids_proto.values().begin(), gids_proto.values().end());
+    if (GlyphSet{gid_a_smcp, gid_b_smcp, gid_c_smcp}.is_subset_of(patch_gids)) {
+      saw_consolidated_smcp_patch = true;
+    }
+  }
+  EXPECT_TRUE(saw_consolidated_smcp_patch) << plan.DebugString();
+
+  Compiler compiler;
+  compiler.SetFace(orig_face.get());
+  ASSERT_TRUE(ift::config::ConfigCompiler::Configure(plan, compiler).ok());
+  auto encoding = compiler.Compile();
+  ASSERT_TRUE(encoding.ok()) << encoding.status();
+  auto encoded_face = encoding->init_font.face();
+
+  EXPECT_EQ(FontHelper::ToCodepointsSet(encoded_face.get()),
+            (IntSet{'a', 'b', 'c', 'f', 'i'}));
+  EXPECT_FALSE(FontHelper::GlyfData(encoded_face.get(), gid_a)->empty());
+  EXPECT_FALSE(FontHelper::GlyfData(encoded_face.get(), gid_f)->empty());
+  EXPECT_FALSE(FontHelper::GlyfData(encoded_face.get(), gid_i)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(encoded_face.get(), gid_fi)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(encoded_face.get(), gid_a_smcp)->empty());
+  EXPECT_TRUE(FontHelper::GlyfData(encoded_face.get(), gid_z)->empty());
+
+  auto woff2_orig = Compiler::RoundTripWoff2(roboto_regular_.str(), false);
+  ASSERT_TRUE(woff2_orig.ok()) << woff2_orig.status();
+  auto woff2_orig_face = woff2_orig->face();
+
+  // 0-RTT rendering for moved ASCII codepoints without triggering 'fi' or
+  // 'smcp'.
+  btree_set<std::string> fetched_uris;
+  auto extended_abcf = ExtendWithDesignSpace(*encoding, {'a', 'b', 'c', 'f'},
+                                             {}, {}, &fetched_uris, 1, 0);
+  ASSERT_TRUE(extended_abcf.ok()) << extended_abcf.status();
+  EXPECT_TRUE(fetched_uris.empty());
+  auto extended_abcf_face = extended_abcf->face();
+  for (uint32_t cp : {'a', 'b', 'c', 'f'}) {
+    EXPECT_TRUE(
+        GlyphDataMatches(woff2_orig_face.get(), extended_abcf_face.get(), cp));
+  }
+  EXPECT_TRUE(FontHelper::GlyfData(extended_abcf_face.get(), gid_fi)->empty());
+  EXPECT_TRUE(
+      FontHelper::GlyfData(extended_abcf_face.get(), gid_a_smcp)->empty());
+
+  fetched_uris.clear();
+  auto extended_i =
+      ExtendWithDesignSpace(*encoding, {'i'}, {}, {}, &fetched_uris, 1, 0);
+  ASSERT_TRUE(extended_i.ok()) << extended_i.status();
+  EXPECT_TRUE(fetched_uris.empty());
+  auto extended_i_face = extended_i->face();
+  EXPECT_TRUE(
+      GlyphDataMatches(woff2_orig_face.get(), extended_i_face.get(), 'i'));
+  EXPECT_TRUE(FontHelper::GlyfData(extended_i_face.get(), gid_fi)->empty());
+
+  // Requesting {'f', 'i'} loads only the on-demand glyph-keyed 'fi' patch.
+  fetched_uris.clear();
+  auto extended_fi =
+      ExtendWithDesignSpace(*encoding, {'f', 'i'}, {}, {}, &fetched_uris, 1, 1);
+  ASSERT_TRUE(extended_fi.ok()) << extended_fi.status();
+  ASSERT_EQ(fetched_uris.size(), 1);
+  EXPECT_NE(fetched_uris.begin()->find(".ift_gk"), std::string::npos);
+  auto extended_fi_face = extended_fi->face();
+  EXPECT_EQ(*FontHelper::GlyfData(extended_fi_face.get(), gid_fi),
+            *FontHelper::GlyfData(orig_face.get(), gid_fi));
+
+  // Requesting {'a'} + smcp loads the 'smcp' table-keyed segment and the
+  // consolidated glyph-keyed small-caps patch for merged {'a', 'b', 'c'}.
+  fetched_uris.clear();
+  auto extended_smcp =
+      ExtendWithDesignSpace(*encoding, {'a'}, {kSmcp}, {}, &fetched_uris);
+  ASSERT_TRUE(extended_smcp.ok()) << extended_smcp.status();
+  ASSERT_EQ(fetched_uris.size(), 2);
+  auto extended_smcp_face = extended_smcp->face();
+  EXPECT_EQ(*FontHelper::GlyfData(extended_smcp_face.get(), gid_a_smcp),
+            *FontHelper::GlyfData(orig_face.get(), gid_a_smcp));
+  EXPECT_EQ(*FontHelper::GlyfData(extended_smcp_face.get(), gid_b_smcp),
+            *FontHelper::GlyfData(orig_face.get(), gid_b_smcp));
+  EXPECT_EQ(*FontHelper::GlyfData(extended_smcp_face.get(), gid_c_smcp),
+            *FontHelper::GlyfData(orig_face.get(), gid_c_smcp));
+  EXPECT_TRUE(FontHelper::GlyfData(extended_smcp_face.get(), gid_z)->empty());
+  EXPECT_TRUE(
+      FontHelper::GlyfData(extended_smcp_face.get(), gid_z_smcp)->empty());
+
+  // Requesting unmoved 'z' loads both its table-keyed and glyph-keyed data.
+  fetched_uris.clear();
+  auto extended_z =
+      ExtendWithDesignSpace(*encoding, {'z'}, {}, {}, &fetched_uris);
+  ASSERT_TRUE(extended_z.ok()) << extended_z.status();
+  EXPECT_EQ(fetched_uris.size(), 2);
+  auto extended_z_face = extended_z->face();
+  EXPECT_TRUE(FontHelper::ToCodepointsSet(extended_z_face.get()).contains('z'));
+  EXPECT_EQ(*FontHelper::GlyfData(extended_z_face.get(), gid_z),
+            *FontHelper::GlyfData(orig_face.get(), gid_z));
 }
 
 }  // namespace ift

@@ -1130,7 +1130,8 @@ TEST_F(ClosureGlyphSegmenterTest, TotalCost_MixedModeUsesCutMixedModeInitSubset)
   ASSERT_TRUE(costs.ok()) << costs.status();
 
   auto expected_init = Compiler::CutMixedModeInitSubset(
-      vf_face.get(), segmentation->InitialFontSegment());
+      vf_face.get(), segmentation->InitialFontSegment(),
+      segmentation->InitialFontGlyphClosure());
   ASSERT_TRUE(expected_init.ok()) << expected_init.status();
   auto expected_woff2 = ift::common::Woff2::EncodeWoff2(
       expected_init->str(), /*glyf_transform=*/true, 11);
@@ -1143,6 +1144,72 @@ TEST_F(ClosureGlyphSegmenterTest, TotalCost_MixedModeUsesCutMixedModeInitSubset)
   ASSERT_TRUE(table_keyed_only_size.ok()) << table_keyed_only_size.status();
   EXPECT_NE((*costs)[0].ift_init_cost,
             static_cast<double>(*table_keyed_only_size));
+}
+
+TEST_F(ClosureGlyphSegmenterTest, TotalCost_SeparatedInitSubsetAndInitGlyphs) {
+  glyph_id_t gid_a = FontHelper::GetNominalGlyph(roboto.get(), 'a').value();
+  glyph_id_t gid_f = FontHelper::GetNominalGlyph(roboto.get(), 'f').value();
+  glyph_id_t gid_i = FontHelper::GetNominalGlyph(roboto.get(), 'i').value();
+  constexpr glyph_id_t gid_fi = 444;
+  constexpr glyph_id_t gid_ffi = 446;
+
+  auto calculator = std::make_unique<MockProbabilityCalculator>(
+      std::vector<std::pair<Segment, double>>{
+          {{{'a'}}, 0.99},
+          {{{'f'}}, 0.65},
+          {{{'i'}}, 0.65},
+      });
+  ProbabilityProfile profile(std::move(calculator));
+  profile.init_font_merge_threshold = -10.0;
+  MergeStrategy strategy = MergeStrategy::CostBased(std::move(profile), 75, 1);
+
+  auto segmentation = segmenter.CodepointToGlyphSegments(
+      roboto.get(), {}, {{'a'}, {'f'}, {'i'}}, strategy);
+  ASSERT_TRUE(segmentation.ok()) << segmentation.status();
+  ASSERT_EQ(segmentation->InitialFontSegment().codepoints,
+            (CodepointSet{'a', 'f', 'i'}));
+  ASSERT_FALSE(segmentation->InitialFontGlyphClosure().contains(gid_fi));
+
+  UnigramProbabilityCalculator eval_calc(UnicodeFrequencies{
+      {{' ', ' '}, 100}, {{'a', 'a'}, 99}, {{'f', 'f'}, 65}, {{'i', 'i'}, 65}});
+  std::vector<SegmentationCost> costs =
+      *segmenter.TotalCosts(roboto.get(), *segmentation, {&eval_calc});
+
+  FontData expected_init = *Compiler::CutMixedModeInitSubset(
+      roboto.get(), segmentation->InitialFontSegment(),
+      segmentation->InitialFontGlyphClosure());
+  FontData expected_woff2 =
+      *ift::common::Woff2::EncodeWoff2(expected_init.str(), true, 11);
+  EXPECT_EQ(costs[0].ift_init_cost, static_cast<double>(expected_woff2.size()));
+
+  ift::common::GlyphSet closured_gids = segmentation->InitialFontGlyphClosure();
+  closured_gids.insert(gid_fi);
+  closured_gids.insert(gid_ffi);
+  FontData closured_init = *Compiler::CutMixedModeInitSubset(
+      roboto.get(), segmentation->InitialFontSegment(), closured_gids);
+  FontData closured_woff2 =
+      *ift::common::Woff2::EncodeWoff2(closured_init.str(), true, 11);
+  EXPECT_LT(costs[0].ift_init_cost, static_cast<double>(closured_woff2.size()));
+
+  // Moving glyphs into InitialFontGlyphClosure() without promoting their
+  // codepoints into InitialFontSegment() must still increase ift_init_cost.
+  GlyphSegmentation notdef_only({}, {0});
+  GlyphSegmentation moved_outlines_only({}, {0, gid_a, gid_f, gid_i});
+  double notdef_init_cost =
+      segmenter.TotalCosts(roboto.get(), notdef_only, {&eval_calc})
+          ->at(0)
+          .ift_init_cost;
+  double moved_init_cost =
+      segmenter.TotalCosts(roboto.get(), moved_outlines_only, {&eval_calc})
+          ->at(0)
+          .ift_init_cost;
+  FontData moved_data = *Compiler::CutMixedModeInitSubset(
+      roboto.get(), moved_outlines_only.InitialFontSegment(),
+      moved_outlines_only.InitialFontGlyphClosure());
+  FontData moved_woff2 =
+      *ift::common::Woff2::EncodeWoff2(moved_data.str(), true, 11);
+  EXPECT_EQ(moved_init_cost, static_cast<double>(moved_woff2.size()));
+  EXPECT_GT(moved_init_cost, notdef_init_cost);
 }
 
 TEST_F(ClosureGlyphSegmenterTest, NoGlyphSegments_CostMerging) {

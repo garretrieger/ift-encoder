@@ -168,10 +168,12 @@ class Compiler {
 
   /*
    * Cuts the initial font subset in mixed mode using `init_subset` (closured
-   * via hb_subset with mixed-mode flags and glyph-keyed base tables).
+   * via hb_subset for non-outline tables) and `init_glyphs` (without layout
+   * or cmap closure for outline tables: glyf/loca, gvar, CFF, CFF2).
    */
   static absl::StatusOr<ift::common::FontData> CutMixedModeInitSubset(
-      hb_face_t* face, const SubsetDefinition& init_subset);
+      hb_face_t* face, const SubsetDefinition& init_subset,
+      const ift::common::GlyphSet& init_glyphs);
 
   absl::Status SetInitSubsetFromDef(const SubsetDefinition& init_subset) {
     if (!init_subset_.Empty()) {

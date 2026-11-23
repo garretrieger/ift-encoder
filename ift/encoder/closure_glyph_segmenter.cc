@@ -924,7 +924,8 @@ StatusOr<std::vector<SegmentationCost>> ClosureGlyphSegmenter::TotalCosts(
     if (!segmentation.GidSegments().empty() ||
         !segmentation.InitialFontGlyphClosure().empty()) {
       FontData init_data = TRY(Compiler::CutMixedModeInitSubset(
-          original_face, segmentation.InitialFontSegment()));
+          original_face, segmentation.InitialFontSegment(),
+          segmentation.InitialFontGlyphClosure()));
       // Mixed-mode always uses WOFF2 glyf_transform (see Compiler::Compile).
       FontData woff2 =
           TRY(Woff2::EncodeWoff2(init_data.str(), /*glyf_transform=*/true, 11));

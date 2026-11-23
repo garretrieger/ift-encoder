@@ -2,6 +2,7 @@
 
 Author: Garret Rieger
 Date: Jun 20, 2025
+Updated: Nov 23, 2026
 
 ## Overview
 
@@ -21,9 +22,20 @@ in the description of the encoding process.
 
 ### Initial Subset
 
-The initial font subset is the set of code points, features, and design space that the initial IFT font will cover.
-The initial IFT font is the first thing loaded by a client and the entry point to IFT extension. Everything in the initial
-font subset will be contained by the initial IFT font, and as a result will not need to be added by extension operations.
+The initial font subset is the set of code points, features, and design space (`initial_codepoints`,
+`initial_features`, and `initial_design_space`) that the initial IFT font's non-outline tables (`cmap`,
+`hmtx`, `GSUB`, `GPOS`, `COLR`, etc.) will cover. The initial IFT font is the first thing loaded by a
+client and the entry point to IFT extension. Everything in the initial font subset will be contained by
+the initial IFT font, and as a result will not need to be added by non-outline table-keyed extension operations.
+
+In mixed mode, the compiler also accepts an explicit set of initial outline glyph IDs (`Compiler::SetInitGlyphs`,
+populated by `ConfigCompiler` from `SegmentationPlan.initial_glyphs`). When explicit `initial_glyphs` is
+configured, outline tables (`glyf`/`loca`, `gvar`, `CFF`, `CFF2`) in the initial font are populated with
+strictly those glyphs without layout or `cmap` closure, while non-outline tables continue to be subsetted using
+closure over the initial subset definition. This allows base characters (for example `f` and `i`) to render
+with zero round trips without pulling conjunctive dependent glyphs (such as the `fi` ligature or optional
+feature substitutions) into the initial outlines. When explicit `initial_glyphs` is unset, mixed mode falls back
+to the glyph closure of the initial font subset.
 
 ### Outline Data vs Non Outline Data
 
@@ -177,9 +189,29 @@ in the high level description given above. This section describes those.
 When generating a font in mixed mode the subsetting operations used to produce the table keyed patches must ensure that
 glyph ids stay consistent at every stage of extension. This is accomplished by configuring the subsetter with the retain
 gids setting. Additionally, at every node the font must have "max glyphs" in the font set large enough to accept
-insertion of any of the reachable glyph keyed patches. Currently, this is handled with a hack of always including the
-largest glyph id from the original font in every node subset. In the future if the subsetting library is upgraded to
-allow forcing a specific number of glyphs, then this hack could be dropped.
+insertion of any of the reachable glyph keyed patches. When explicit `initial_glyphs` is configured, the compiler enables
+`HB_SUBSET_FLAGS_RETAIN_NUM_GLYPHS` directly to preserve the full glyph count. When `initial_glyphs` is unset, it falls
+back to always including the largest glyph id from the original font in every node subset.
+
+#### Explicit Initial Outline Glyphs
+
+When explicit `initial_glyphs` is configured in mixed mode, `CutSubset` separates non-outline subsetting from outline
+table construction:
+
+1. Non-outline tables (`cmap`, `hmtx`, `GSUB`, `GPOS`, etc.) are subsetted via HarfBuzz closure of the node's subset
+   definition (including `HB_SUBSET_FLAGS_RETAIN_GIDS` and `HB_SUBSET_FLAGS_RETAIN_NUM_GLYPHS`).
+2. `glyf`/`loca` and `CFF ` are extracted via an outline-only HarfBuzz subset call (`CutOutlineSubsetFaceBuilder`) on a
+   zero-copy face view with non-outline closure tables (`cmap`, `GSUB`, `GPOS`, `GDEF`, `MATH`, `COLR`, `CPAL`, `VARC`)
+   removed and dropped, configured with `HB_SUBSET_FLAGS_NO_LAYOUT_CLOSURE | HB_SUBSET_FLAGS_NO_BIDI_CLOSURE |
+   HB_SUBSET_FLAGS_RETAIN_GIDS | HB_SUBSET_FLAGS_RETAIN_NUM_GLYPHS` (and `HB_SUBSET_FLAGS_NOTDEF_OUTLINE` only when GID 0
+   is included). Composite components in `glyf`/`CFF ` remain closured so composite initial glyphs render immediately.
+   The extracted `glyf`, `loca`, or `CFF ` tables are transplanted onto the node face, and `head.indexToLocFormat` is
+   synced to match `loca`.
+3. Variable outline tables (`gvar` step 2 in `GenerateBaseGvar` and `CFF2` in `GenerateBaseCff2`) likewise populate only
+   `initial_glyphs`.
+
+`Compiler::CutMixedModeInitSubset` exposes this same separated subsetting path so `ClosureGlyphSegmenter::TotalCosts`
+computes accurate mixed-mode initial font sizes.
 
 #### gvar special casing
 

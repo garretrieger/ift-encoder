@@ -2,7 +2,7 @@
 
 Author: Garret Rieger  
 Date: Aug 5th, 2026  
-Updated: Nov 12th, 2026
+Updated: Nov 23rd, 2026
 
 ## Introduction
 
@@ -45,14 +45,19 @@ of code points and layout features. When a font is extended to support a particu
 then all glyphs needed to render any text which is a subset of that segments (and any previously loaded ones)
 will be loaded into the font.
 
-*Initial Font*: An IFT font can choose to include zero or more glyphs in the font that is initially loaded by
-the client. These glyphs are then always available and don't need to be patched in. This is useful for glyphs
-that are needed with near 100% probability as it eliminates all of the overhead associated with having them
-separately in a patch.
+*Initial Font*: An IFT font can choose to include zero or more glyphs and non-outline coverage in the font
+that is initially loaded by the client. Outline glyphs placed in the initial font are always available and
+don't need to be patched in, eliminating per-patch overhead and network round trips for high-probability
+glyphs. Codepoints and layout features can also be included in the initial font independently of dependent
+conjunctive glyphs (such as ligatures or optional-feature substitutions), allowing base characters to render
+with zero round trips while keeping conditional dependent glyphs in `IFTX` patches.
 
 *Segmentation Plan*: the output of the segmenter. It is composed of three main things:
 
-1. Initial font definition: the set of glyphs to be included in the initial font.
+1. Initial font definition: the non-outline coverage (`initial_codepoints` and `initial_features`, used to
+   subset tables such as `cmap`, `hmtx`, `GSUB`, and `GPOS`) and the explicit outline glyph IDs
+   (`initial_glyphs`, used to populate outline tables such as `glyf`/`loca`, `gvar`, `CFF`, and `CFF2`
+   without layout closure).
 
 2. Segment definitions: a list of one or more segments and the codepoints/layout feature sets that they are composed
    of.
@@ -60,9 +65,12 @@ separately in a patch.
 3. Patches: each patch is defined by a set of glyph ids and the activation condition for when the patch is needed.
    The condition is a conjunctive normal form boolean expression in terms of segments.
 
-For this particular segmenter implementation a segmentation plan's segment and patch definitions are always
-disjoint. As a result each glyph is only found in exactly one patch. Segmentation plans can be encoded
-in protobuf format using [segmentation_plan.proto](../ift/config/segmentation_plan.proto)
+For this particular segmenter implementation a segmentation plan's non-empty patch glyph sets and
+`initial_glyphs` are always mutually disjoint, so each glyph appears in at most one patch or in the
+initial font. However, segments whose codepoints or features have been promoted into `initial_codepoints` /
+`initial_features` remain listed in `plan.segments` when they are still referenced by conjunctive activation
+conditions on remaining patches. Segmentation plans can be encoded in protobuf format using
+[segmentation_plan.proto](../ift/config/segmentation_plan.proto)
 
 *Closure Requirement*: segmentation plans produced by the segmenter must meet the "closure requirement":
 The set of glyphs contained in patches loaded for a font subset definition (a set of Unicode
@@ -148,9 +156,41 @@ the glyphs as a conditionally loaded patch, eliminates a network round trip so t
 available to the user, and because they are nearly always needed there's no negative impact in
 having them always loaded.
 
-Before the more general merging procedure all patches in the initial glyph segmentation are analyzed
-to see what the expected cost reduction is to move the glyphs of that patch into the initial font.
-Any patches where the reduction is significant (configurable threshold) are moved to the initial font.
+The initial font state ([`InitialFont`](../ift/encoder/initial_font.h)) separates three concerns:
+
+1. **Frozen Closure Baseline (`closed_input_definition_`)**: Computed once from `SegmenterConfig.initial_segment`
+   (plus default layout features) using full `ExpandClosure`. The dependency graph and `DependencyClosure`
+   treat only this baseline as always-true and are never invalidated or recomputed when optimization moves
+   additional glyphs or segments into the initial font.
+2. **Mutable Glyph-Keyed Initial Glyphs (`initial_glyphs`)**: Initialized to the closed input glyphs (and any
+   initially always-true glyphs) and extended directly during initial font merging without closure expansion.
+3. **Mutable Table-Keyed Initial Coverage (`initial_codepoints`, `initial_features`)**: Populated from
+   `closed_input_definition_` and extended selectively for promoted segments after patch moves finish.
+
+For each frequency data set that configures an `initial_font_merge_threshold`, patches involving segments above
+that profile's probability threshold are evaluated (first in batch mode over inert unitary patches, then
+individually by lowest cost delta) to see if moving the patch's glyph set $G$ into `initial_glyphs` reduces
+expected transfer cost:
+
+$$\Delta \text{cost} = \Delta \text{init\_size} - P_m(c) \times (\text{size}(G) + k)$$
+
+where $\Delta \text{init\_size} = \max(0, \text{size}(G_{\text{init}} \cup G) - \text{size}(G_{\text{init}}))$
+(damped across retries by tracking the smallest observed size increase to avoid Brotli noise). Moving an accepted
+patch adds $G$ directly into `initial_glyphs` and drops the patch from the segmentation without modifying
+any remaining patch's glyph set or activation condition. Consequently, conjunctive conditions such as `(s_f AND s_i)`
+for the `fi` ligature or `(s_a AND s_smcp)` for small caps are preserved instead of weakening to `(s_i)` or `(s_smcp)`.
+High-probability empty-outline glyph patches (such as spaces) remain eligible during initial font moves before
+any remaining unmoved empty glyphs are excluded from target patches.
+
+After patch moves and empty-glyph exclusion complete for an opted-in profile, segments passing that profile's
+probability threshold that appear in the dependency condition of at least one glyph in `initial_glyphs` are
+checked for promotion into `initial_codepoints` / `initial_features`. A candidate segment $s$ is promoted iff no
+remaining patch condition $c$ is satisfied by $s$ alone (every clause in $c$ contains $s$). This blocks promotion
+for segments with an unmoved exclusive patch `if (s)` or unmoved disjunctive patch `if (s OR s_2)`, while
+allowing segments whose only remaining patches are conjunctive (such as `if (s_f AND s_i)` or `if (s_a AND s_smcp)`)
+to promote their codepoints/features so base characters render with 0 round trips. Promoted segments with no
+remaining patch conditions are cleared from `plan.segments`, whereas promoted segments still referenced by
+remaining conjunctive conditions remain active for downstream merging and `IFTX` condition compilation.
 
 ### Assessing Cost Deltas
 
@@ -187,13 +227,19 @@ greedily merging into one base segment at a time. Evaluating candidates globally
 where a high-probability segment absorbs a lower-probability segment for a marginal gain and blocks
 a much stronger merge between that lower-probability segment and another partner.
 
-Active segments with exclusive patches above the low-impact optimization cutoff are maintained in
+Active segments above the low-impact optimization cutoff with remaining patch conditions are maintained in
 descending probability order so candidate pairs can be pruned early once lower-ranked inert segments
-fall below the best-case probability threshold. Multi-segment composite activation conditions are
-also queued as candidate merges. Only strictly cost-reducing merges ($\Delta \text{cost} < 0$) are
+fall below the best-case probability threshold. In `IFT` mode, `AllPairsMerger` partitions active segments
+into two separate probability-ordered sets: segments with exclusive patches (`active_segments_by_prob_`) and
+segments without exclusive glyphs that still appear in target glyph conditions
+(`active_no_exclusive_segments_by_prob_`, such as promoted 0-RTT segments that trigger optional-feature or
+ligature patches). Both pairwise candidate generation and multi-segment composite candidate selection operate
+strictly within each partition and never mix segments across the two partitions—allowing moved 0-RTT
+segments (for example `a..z` interacting with `smcp`) to merge and consolidate conditional feature patches
+without merging into unmoved exclusive-patch segments. Only strictly cost-reducing merges ($\Delta \text{cost} < 0$) are
 accepted during all-pairs merging; once all negative cost delta candidates are exhausted, the
-all-pairs phase finishes and any remaining undersized segments are handled in a separate pass for
-minimum group size enforcement.
+all-pairs phase finishes and any remaining undersized segments with exclusive patches are handled in a separate
+pass for minimum group size enforcement.
 
 To avoid evaluating $O(n^2)$ Brotli compressions upfront and recomputing unaffected pairs after
 every merge, `AllPairsMerger` combines three mechanisms:
