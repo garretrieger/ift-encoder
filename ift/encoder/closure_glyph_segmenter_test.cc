@@ -4431,4 +4431,73 @@ TEST_F(
   }
 }
 
+TEST_F(ClosureGlyphSegmenterTest,
+       MultiMergeGroup_SharedOutOfScopeClausePatchMerge) {
+  // Segments s0..s3 form Group 1 (cost-based) and s4 forms Group 2 (None):
+  //   'A' (s0): (s0 OR s2) -> gid37
+  //   'C' (s1): (s1 OR s3) -> gid39
+  //   acute mark (gid117, gid169): (s2 OR s3 OR s4)  [out-of-scope for Group 1]
+  //   Aacute (gid640): ((s0 OR s2) AND (s2 OR s3 OR s4))
+  //   Cacute (gid700): ((s1 OR s3) AND (s2 OR s3 OR s4))
+  //   Eacute + 'E' (gid41, gid648): (s4)
+  // High probabilities on 'A'/'C' and low probabilities on 0xC1/0x106 keep all
+  // segment merges unfavorable (e.g. merging s0 and s2 would promote the
+  // acute mark from P~0.02 to P~0.99), isolating the effect of patch merging on
+  // Aacute and Cacute across the shared out-of-scope clause (s2 OR s3 OR s4).
+  std::vector<SubsetDefinition> inputs = {
+      {'A'}, {'C'}, {0xC1}, {0x106}, {0xC9},
+  };
+
+  auto run_with_patch_merges = [&](bool use_patch_merges) {
+    UnicodeFrequencies frequencies{
+        {{' ', ' '}, 1000}, {{'A', 'A'}, 990},    {{'C', 'C'}, 990},
+        {{0xC1, 0xC1}, 10}, {{0x106, 0x106}, 10},
+    };
+    MergeStrategy group1 = MergeStrategy::CostBased(
+        *ProbabilityProfile::Unigram(std::move(frequencies)),
+        /*network_overhead_cost=*/500, /*min_group_size=*/1);
+    group1.SetOptimizationCutoffFraction(0.0);
+    group1.SetUsePatchMerges(use_patch_merges);
+
+    btree_map<SegmentSet, MergeStrategy> merge_groups = {
+        {{0, 1, 2, 3}, group1},
+        {{4}, MergeStrategy::None()},
+    };
+    return segmenter.CodepointToGlyphSegments(roboto.get(), {}, inputs,
+                                              merge_groups);
+  };
+
+  auto without_pm = run_with_patch_merges(false);
+  ASSERT_TRUE(without_pm.ok()) << without_pm.status();
+  EXPECT_EQ(without_pm->ToString(),
+            R"(initial font: { gid0 }
+p0: { gid41, gid648 }
+p1: { gid37 }
+p2: { gid39 }
+p3: { gid117, gid169 }
+p4: { gid640 }
+p5: { gid700 }
+if (s4) then p0
+if ((s0 OR s2)) then p1
+if ((s1 OR s3)) then p2
+if ((s2 OR s3 OR s4)) then p3
+if ((s0 OR s2) AND (s2 OR s3 OR s4)) then p4
+if ((s1 OR s3) AND (s2 OR s3 OR s4)) then p5
+)");
+
+  auto with_pm = run_with_patch_merges(true);
+  ASSERT_TRUE(with_pm.ok()) << with_pm.status();
+  EXPECT_EQ(with_pm->ToString(),
+            R"(initial font: { gid0 }
+p0: { gid41, gid648 }
+p1: { gid117, gid169 }
+p2: { gid37, gid39 }
+p3: { gid640, gid700 }
+if (s4) then p0
+if ((s2 OR s3 OR s4)) then p1
+if ((s0 OR s1 OR s2 OR s3)) then p2
+if ((s0 OR s1 OR s2 OR s3) AND (s2 OR s3 OR s4)) then p3
+)");
+}
+
 }  // namespace ift::encoder

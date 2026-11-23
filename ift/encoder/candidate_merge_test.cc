@@ -2217,4 +2217,169 @@ TEST_F(CandidateMergeTest,
   EXPECT_NEAR(*exact_delta, expected_exact, 1e-9);
 }
 
+TEST_F(CandidateMergeTest, AssessPatchMerge_SharedOutOfScopeClauses) {
+  // 1. In DEP_GRAPH_ONLY mode, conditions within inscope = {0, 1, 2} that share
+  // identical out-of-scope clauses are allowed to patch-merge, while
+  // mismatched out-of-scope clauses or conditions without an in-scope clause
+  // are rejected.
+  {
+    std::vector<Segment> segments = {
+        {{'A'}}, {{'B'}}, {{'C'}}, {{'D'}}, {{'E'}},
+    };
+
+    std::vector<std::pair<Segment, double>> probs = {
+        {{{'A'}}, 0.90}, {{{'B'}}, 0.85}, {{{'C'}}, 0.50},
+        {{{'D'}}, 0.80}, {{{'E'}}, 0.70}, {{{'A', 'B'}}, 0.92},
+    };
+
+    SegmentSet inscope{0, 1, 2};
+    ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY, resolver);
+    auto context = SegmentationContext::InitializeSegmentationContext(
+        roboto.get(), {}, segments, segmenter.condition_analysis_mode(),
+        segmenter.brotli_quality(),
+        segmenter.init_font_merging_brotli_quality(), resolver);
+    ASSERT_TRUE(context.ok()) << context.status();
+
+    Merger merger = *Merger::New(
+        *context,
+        MergeStrategy::CostBased(
+            ProbabilityProfile(
+                std::make_shared<MockProbabilityCalculator>(probs)),
+            75, 1),
+        inscope, inscope);
+
+    // Manually wire distinct conditions onto unused glyphs (ASCII 'f'..'j').
+    glyph_id_t gid_f = *FontHelper::GetNominalGlyph(roboto.get(), 'f');
+    glyph_id_t gid_g = *FontHelper::GetNominalGlyph(roboto.get(), 'g');
+    glyph_id_t gid_h = *FontHelper::GetNominalGlyph(roboto.get(), 'h');
+    glyph_id_t gid_i = *FontHelper::GetNominalGlyph(roboto.get(), 'i');
+    glyph_id_t gid_j = *FontHelper::GetNominalGlyph(roboto.get(), 'j');
+    glyph_id_t gid_k = *FontHelper::GetNominalGlyph(roboto.get(), 'k');
+    glyph_id_t gid_l = *FontHelper::GetNominalGlyph(roboto.get(), 'l');
+
+    // (s0 AND s3)
+    context->glyph_condition_set.AddAndCondition(gid_f, 0);
+    context->glyph_condition_set.AddAndCondition(gid_f, 3);
+    // (s1 AND s3)
+    context->glyph_condition_set.AddAndCondition(gid_g, 1);
+    context->glyph_condition_set.AddAndCondition(gid_g, 3);
+    // (s1 AND s4)
+    context->glyph_condition_set.AddAndCondition(gid_h, 1);
+    context->glyph_condition_set.AddAndCondition(gid_h, 4);
+    // (s1 OR s2)
+    context->glyph_condition_set.AddOrCondition(gid_i, 1);
+    context->glyph_condition_set.AddOrCondition(gid_i, 2);
+    // (s0 OR s3)
+    context->glyph_condition_set.AddOrCondition(gid_j, 0);
+    context->glyph_condition_set.AddOrCondition(gid_j, 3);
+    // (s1 OR s3)
+    context->glyph_condition_set.AddOrCondition(gid_k, 1);
+    context->glyph_condition_set.AddOrCondition(gid_k, 3);
+    // Exclusive s2 (used to populate gid_l only if needed; check groupings).
+    context->glyph_condition_set.AddAndCondition(gid_l, 2);
+
+    auto sc = context->glyph_groupings.GroupGlyphs(
+        context->SegmentationInfo(), context->glyph_condition_set,
+        {gid_f, gid_g, gid_h, gid_i, gid_j, gid_k, gid_l}, {0, 1, 2, 3, 4});
+    ASSERT_TRUE(sc.ok()) << sc;
+
+    MockPatchSizeCache* size_cache = new MockPatchSizeCache();
+    size_cache->SetPatchSize({gid_f}, 200);
+    size_cache->SetPatchSize({gid_g}, 200);
+    size_cache->SetPatchSize({gid_f, gid_g}, 300);
+    context->patch_size_cache.reset(size_cache);
+
+    ActivationCondition s0_and_s3 =
+        ActivationCondition::and_segments({0, 3}, 0);
+    ActivationCondition s1_and_s3 =
+        ActivationCondition::and_segments({1, 3}, 0);
+    ActivationCondition s1_and_s4 =
+        ActivationCondition::and_segments({1, 4}, 0);
+    ActivationCondition s1_or_s2 = ActivationCondition::or_segments({1, 2}, 0);
+    ActivationCondition s0_or_s3 = ActivationCondition::or_segments({0, 3}, 0);
+    ActivationCondition s1_or_s3 = ActivationCondition::or_segments({1, 3}, 0);
+
+    // Allowed: (s0 AND s3) + (s1 AND s3) -> ((s0 OR s1) AND s3).
+    auto ok_merge = CandidateMerge::AssessPatchMerge(merger, s0_and_s3,
+                                                     s1_and_s3, std::nullopt);
+    ASSERT_TRUE(ok_merge.ok()) << ok_merge.status();
+    ASSERT_TRUE(ok_merge->has_value());
+    double expected_delta = -(0.90 * 0.80) * (200 + 75) -
+                            (0.85 * 0.80) * (200 + 75) +
+                            (0.92 * 0.80) * (300 + 75);
+    EXPECT_NEAR((*ok_merge)->CostDelta(), expected_delta, 1e-9);
+
+    // Rejected: mismatched out-of-scope clauses (s0 AND s3) vs (s1 AND s4).
+    auto mismatch_oos = CandidateMerge::AssessPatchMerge(
+        merger, s0_and_s3, s1_and_s4, std::nullopt);
+    ASSERT_TRUE(mismatch_oos.ok()) << mismatch_oos.status();
+    EXPECT_FALSE(mismatch_oos->has_value());
+
+    // Rejected: asymmetric out-of-scope clause (s0 AND s3) vs (s1 OR s2).
+    auto asymmetric_oos = CandidateMerge::AssessPatchMerge(
+        merger, s0_and_s3, s1_or_s2, std::nullopt);
+    ASSERT_TRUE(asymmetric_oos.ok()) << asymmetric_oos.status();
+    EXPECT_FALSE(asymmetric_oos->has_value());
+
+    // Rejected: no in-scope clause in either condition (s0 OR s3) vs (s1 OR
+    // s3).
+    auto no_inscope_clause = CandidateMerge::AssessPatchMerge(
+        merger, s0_or_s3, s1_or_s3, std::nullopt);
+    ASSERT_TRUE(no_inscope_clause.ok()) << no_inscope_clause.status();
+    EXPECT_FALSE(no_inscope_clause->has_value());
+  }
+
+  // 2. In DEP_GRAPH_ONLY_WITH_SIMPLIFICATION mode, if NonCompositeSuperset()
+  // drops the in-scope clause when simplifying ((s0 OR s1) AND s2) to if (s2),
+  // AssessPatchMerge rejects the candidate.
+  {
+    std::vector<Segment> segments = {
+        {{'A'}},
+        {{'B'}},
+        {{'C'}},
+    };
+    std::vector<std::pair<Segment, double>> probs = {
+        {{{'A'}}, 0.90},
+        {{{'B'}}, 0.85},
+        {{{'C'}}, 0.50},
+        {{{'A', 'B'}}, 0.92},
+    };
+    SegmentSet inscope{0, 1};
+
+    ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY_WITH_SIMPLIFICATION,
+                                    resolver);
+    auto context = SegmentationContext::InitializeSegmentationContext(
+        roboto.get(), {}, segments, segmenter.condition_analysis_mode(),
+        segmenter.brotli_quality(),
+        segmenter.init_font_merging_brotli_quality(), resolver);
+    ASSERT_TRUE(context.ok()) << context.status();
+
+    Merger merger = *Merger::New(
+        *context,
+        MergeStrategy::CostBased(
+            ProbabilityProfile(
+                std::make_shared<MockProbabilityCalculator>(probs)),
+            75, 1),
+        inscope, inscope);
+
+    glyph_id_t gid_f = *FontHelper::GetNominalGlyph(roboto.get(), 'f');
+    glyph_id_t gid_g = *FontHelper::GetNominalGlyph(roboto.get(), 'g');
+    context->glyph_condition_set.AddAndCondition(gid_f, 0);
+    context->glyph_condition_set.AddAndCondition(gid_f, 2);
+    context->glyph_condition_set.AddAndCondition(gid_g, 1);
+    context->glyph_condition_set.AddAndCondition(gid_g, 2);
+
+    auto sc = context->glyph_groupings.GroupGlyphs(context->SegmentationInfo(),
+                                                   context->glyph_condition_set,
+                                                   {gid_f, gid_g}, {0, 1, 2});
+    ASSERT_TRUE(sc.ok()) << sc;
+
+    auto rejected = CandidateMerge::AssessPatchMerge(
+        merger, ActivationCondition::and_segments({0, 2}, 0),
+        ActivationCondition::and_segments({1, 2}, 0), std::nullopt);
+    ASSERT_TRUE(rejected.ok()) << rejected.status();
+    EXPECT_FALSE(rejected->has_value());
+  }
+}
+
 }  // namespace ift::encoder

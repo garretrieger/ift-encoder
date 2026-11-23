@@ -598,7 +598,16 @@ StatusOr<std::optional<InvalidationSet>> Merger::PatchMergeWithCosts(
       continue;
     }
 
-    std::optional<segment_index_t> min = next.TriggeringSegments().min();
+    std::optional<segment_index_t> min;
+    for (const SegmentSet& clause : next.conditions()) {
+      if (clause.is_subset_of(inscope_segments_)) {
+        std::optional<segment_index_t> clause_min = clause.min();
+        if (clause_min.has_value() &&
+            (!min.has_value() || *clause_min < *min)) {
+          min = clause_min;
+        }
+      }
+    }
     if (smallest_candidate_merge.has_value() && min.has_value() &&
         min >= optimization_cutoff_segment_) {
       // This condition is below the optimization cutoff, so we won't evaluate
@@ -844,12 +853,17 @@ GlyphSet Merger::ComputeCandidatePatchMergeGlyphs(
       continue;
     }
 
-    SegmentSet triggering_segments = condition.TriggeringSegments();
-
-    if (!triggering_segments.intersects(active_inscope_segments) ||
-        !triggering_segments.is_subset_of(inscope_segments)) {
-      // all triggering segments must be inscope otherwise this merge crosses
-      // merge group boundaries.
+    bool has_active_inscope_clause = false;
+    for (const SegmentSet& clause : condition.conditions()) {
+      if (!clause.empty() && clause.is_subset_of(inscope_segments) &&
+          clause.intersects(active_inscope_segments)) {
+        has_active_inscope_clause = true;
+        break;
+      }
+    }
+    if (!has_active_inscope_clause) {
+      // At least one clause must belong entirely to this merge group so that
+      // patch merging only combines clauses within merge group boundaries.
       continue;
     }
 

@@ -954,6 +954,44 @@ StatusOr<std::optional<CandidateMerge>> CandidateMerge::AssessSegmentMerge(
   return candidate;
 }
 
+static bool HasInScopeClause(const ActivationCondition& condition,
+                             const SegmentSet& inscope) {
+  for (const SegmentSet& clause : condition.conditions()) {
+    if (!clause.empty() && clause.is_subset_of(inscope)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool OutOfScopeClausesMatch(const ActivationCondition& a,
+                                   const ActivationCondition& b,
+                                   const SegmentSet& inscope) {
+  const auto a_clauses = a.conditions();
+  const auto b_clauses = b.conditions();
+  auto a_it = a_clauses.begin();
+  auto b_it = b_clauses.begin();
+
+  auto advance_to_out_of_scope = [&](auto& it, auto end) {
+    while (it != end && it->is_subset_of(inscope)) {
+      ++it;
+    }
+  };
+
+  while (true) {
+    advance_to_out_of_scope(a_it, a_clauses.end());
+    advance_to_out_of_scope(b_it, b_clauses.end());
+    if (a_it == a_clauses.end() || b_it == b_clauses.end()) {
+      return a_it == a_clauses.end() && b_it == b_clauses.end();
+    }
+    if (*a_it != *b_it) {
+      return false;
+    }
+    ++a_it;
+    ++b_it;
+  }
+}
+
 StatusOr<std::optional<CandidateMerge>> CandidateMerge::AssessPatchMerge(
     Merger& merger, const ActivationCondition& condition_a,
     const ActivationCondition& condition_b,
@@ -962,8 +1000,25 @@ StatusOr<std::optional<CandidateMerge>> CandidateMerge::AssessPatchMerge(
     return absl::InternalError("Can't merge condition with itself");
   }
 
+  // Only allow patch merging when both inputs have at least one purely
+  // in-scope clause and identical out-of-scope clauses, so any out-of-group
+  // clauses are factored out unchanged rather than merged across groups.
+  const SegmentSet& inscope = merger.InscopeSegments();
+  if (!HasInScopeClause(condition_a, inscope) ||
+      !HasInScopeClause(condition_b, inscope) ||
+      !OutOfScopeClausesMatch(condition_a, condition_b, inscope)) {
+    return std::nullopt;
+  }
+
   PatchMergeDetails details =
       TRY(ComputePatchMergeDetails(merger, condition_a, condition_b));
+
+  // Simplification (e.g. NonCompositeSuperset) could drop the in-scope clause
+  // or modify an out-of-scope clause; reject if that happens.
+  if (!HasInScopeClause(details.merged_condition, inscope) ||
+      !OutOfScopeClausesMatch(condition_a, details.merged_condition, inscope)) {
+    return std::nullopt;
+  }
 
   if (merger.Strategy().UseCosts() && best_merge_candidate.has_value()) {
     // Pre-filter, if possible, with a best case computation to avoid computing

@@ -355,7 +355,9 @@ merging strategy.
 
 During merging analysis, merge groups are isolated from each other: each merge group is processed
 independently and only evaluates candidate merges among the segments and patches exclusively assigned
-to that group. Any segment that belongs to more than one merge group is classified as a shared
+to that group. During patch merging, a merge group may also consolidate non-exclusive patches that
+share identical out-of-group conjunctive clauses when each input and the merged result retain at
+least one clause belonging exclusively to that merge group. Any segment that belongs to more than one merge group is classified as a shared
 segment and excluded from merge candidate selection across all groups.
 
 Isolating merge groups from each other serves two purposes:
