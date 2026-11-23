@@ -94,6 +94,9 @@ class DependencyClosure {
 
   absl::Status SegmentsReset();
 
+  absl::Status SegmentsClearedToInitFont(
+      const ift::common::SegmentSet& cleared_segments);
+
   // The collection of SegmentsThatInteractWith(...) methods are used to
   // locate segments that have interactions with unicodes/features/glyphs.
   //
@@ -194,6 +197,10 @@ class DependencyClosure {
       const common::SegmentSet& changed_segments, bool include_init_font);
   void UpdateNodeConditionsCache(segment_index_t base_segment,
                                  const common::SegmentSet& segments);
+  void UpdateNodeConditionInCache(dep_graph::Node node,
+                                  ConditionAndSegments& entry,
+                                  ActivationCondition new_condition,
+                                  common::SegmentSet new_interacting_segments);
 
   const RequestedSegmentationInformation* segmentation_info_;
   ift::common::hb_face_unique_ptr original_face_;
@@ -226,7 +233,7 @@ class DependencyClosure {
           dep_graph::Node, std::vector<dep_graph::EdgeConditionsCnf>>>>
       incoming_edges_cache_;
 
-  // Nodes belonging to the initial font, computed once on creation.
+  // Nodes belonging to the unsegmented initial font.
   absl::flat_hash_set<dep_graph::Node> init_font_nodes_;
 };
 

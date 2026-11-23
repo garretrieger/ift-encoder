@@ -63,6 +63,35 @@ Status DependencyClosure::SegmentsReset() {
   return InitNodeConditionsCache(SegmentSet::all(), /*include_init_font=*/true);
 }
 
+Status DependencyClosure::SegmentsClearedToInitFont(
+    const SegmentSet& cleared_segments) {
+  if (cleared_segments.empty()) {
+    return absl::OkStatus();
+  }
+  init_font_nodes_ = TRY(ComputeInitFontNodes());
+  if (!segmentation_info_->SegmentsAreDisjoint()) {
+    return SegmentsReset();
+  }
+
+  auto affected_nodes = SegmentsToInteractingNode(cleared_segments);
+  for (Node node : affected_nodes) {
+    auto it = node_condition_cache_.find(node);
+    if (it == node_condition_cache_.end()) {
+      continue;
+    }
+
+    ActivationCondition new_condition =
+        it->second.condition.RemoveIntersectingSubgroups(cleared_segments);
+    SegmentSet new_interacting_segments = it->second.interacting_segments;
+    new_interacting_segments.subtract(cleared_segments);
+    UpdateNodeConditionInCache(node, it->second, std::move(new_condition),
+                               std::move(new_interacting_segments));
+  }
+
+  inert_segments_ = ComputeInertSegments(glyph_condition_cache_);
+  return absl::OkStatus();
+}
+
 Status DependencyClosure::InitNodeConditionsCache(
     const common::SegmentSet& changed_segments, bool include_init_font) {
   TRYV(UpdateAllNodeConditions(changed_segments, include_init_font));
@@ -94,6 +123,43 @@ Status DependencyClosure::InitNodeConditionsCache(
   return absl::OkStatus();
 }
 
+void DependencyClosure::UpdateNodeConditionInCache(
+    Node node, ConditionAndSegments& entry, ActivationCondition new_condition,
+    SegmentSet new_interacting_segments) {
+  for (segment_index_t s : entry.condition.TriggeringSegments()) {
+    if (auto map_it = node_conditions_with_segment_.find(s);
+        map_it != node_conditions_with_segment_.end()) {
+      map_it->second.erase(node);
+    }
+  }
+  for (segment_index_t s : entry.interacting_segments) {
+    if (auto map_it = node_interacting_segments_with_segment_.find(s);
+        map_it != node_interacting_segments_with_segment_.end()) {
+      map_it->second.erase(node);
+    }
+  }
+
+  entry.condition = std::move(new_condition);
+  entry.interacting_segments = std::move(new_interacting_segments);
+
+  if (node.IsGlyph() &&
+      segmentation_info_->NonClosedInputGlyphs().contains(node.Id())) {
+    glyph_condition_cache_.insert_or_assign(node.Id(), entry.condition);
+    glyph_interacting_segment_cache_.insert_or_assign(
+        node.Id(), entry.interacting_segments);
+    if (entry.condition.IsAlwaysTrue()) {
+      always_true_glyphs_.insert(node.Id());
+    }
+  }
+
+  for (segment_index_t s : entry.condition.TriggeringSegments()) {
+    node_conditions_with_segment_[s].insert(node);
+  }
+  for (segment_index_t s : entry.interacting_segments) {
+    node_interacting_segments_with_segment_[s].insert(node);
+  }
+}
+
 void DependencyClosure::UpdateNodeConditionsCache(
     segment_index_t base_segment, const common::SegmentSet& segments) {
   auto affected_nodes = SegmentsToInteractingNode(segments);
@@ -106,48 +172,20 @@ void DependencyClosure::UpdateNodeConditionsCache(
       continue;
     }
 
-    for (segment_index_t s : it->second.condition.TriggeringSegments()) {
-      auto it = node_conditions_with_segment_.find(s);
-      if (it != node_conditions_with_segment_.end()) {
-        it->second.erase(node);
-      }
-    }
-    for (segment_index_t s : it->second.interacting_segments) {
-      auto it = node_interacting_segments_with_segment_.find(s);
-      if (it != node_interacting_segments_with_segment_.end()) {
-        it->second.erase(node);
-      }
-    }
-
     ActivationCondition new_condition =
         it->second.condition.ReplaceSegments(base_segment, segments);
-    it->second.condition = new_condition;
-
-    if (it->second.interacting_segments.intersects(segments)) {
-      SegmentSet new_segments = it->second.interacting_segments;
+    SegmentSet new_segments = it->second.interacting_segments;
+    if (new_segments.intersects(segments)) {
       new_segments.subtract(segments);
       new_segments.insert(base_segment);
-      it->second.interacting_segments = new_segments;
-    }
-
-    if (node.IsGlyph() &&
-        segmentation_info_->NonClosedInputGlyphs().contains(node.Id())) {
-      glyph_condition_cache_.erase(node.Id());
-      glyph_condition_cache_.insert({node.Id(), new_condition});
-      glyph_interacting_segment_cache_.erase(node.Id());
-      glyph_interacting_segment_cache_.insert({node.Id(), it->second.interacting_segments});
     }
 
     if (!new_condition.IsUnitary()) {
       base_is_inert = false;
     }
 
-    for (segment_index_t s : it->second.condition.TriggeringSegments()) {
-      node_conditions_with_segment_[s].insert(node);
-    }
-    for (segment_index_t s : it->second.interacting_segments) {
-      node_interacting_segments_with_segment_[s].insert(node);
-    }
+    UpdateNodeConditionInCache(node, it->second, std::move(new_condition),
+                               std::move(new_segments));
   }
 
   inert_segments_.subtract(segments);
@@ -481,7 +519,7 @@ StatusOr<flat_hash_set<Node>> DependencyClosure::ComputeInitFontNodes() const {
   for (glyph_id_t g : init_font.ClosedInputGlyphs()) {
     init_font_nodes.insert(Node::Glyph(g));
   }
-  for (hb_codepoint_t c : init_font.ClosedInputDefinition().codepoints) {
+  for (hb_codepoint_t c : init_font.UnsegmentedDefinition().codepoints) {
     init_font_nodes.insert(Node::Unicode(c));
   }
   auto init_features = TRY(graph_.InitFontFeatureSet());

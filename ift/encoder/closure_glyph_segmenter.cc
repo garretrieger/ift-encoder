@@ -829,7 +829,7 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
   }
 
   if (init_font_changed) {
-    context.PromoteInitFontSegments(eligible_init_segments);
+    TRYV(context.PromoteInitFontSegments(eligible_init_segments));
     VLOG(0) << "Initial font now has "
             << context.SegmentationInfo().InitFontSegment().codepoints.size()
             << " codepoints and "

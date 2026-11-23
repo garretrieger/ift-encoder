@@ -704,8 +704,8 @@ TEST_F(ClosureGlyphSegmenterTest, SimpleSegmentation_PatchMerge) {
   UnicodeFrequencies frequencies{
       {{'A', 'A'}, 1000},
       {{'C', 'C'}, 1000},
-      {{0xC1, 0xC1}, 1},   /* Aacute */
-      {{0x106, 0x106}, 1}, /* Cacute */
+      {{0xC4, 0xC4}, 1},   /* Adieresis */
+      {{0x10C, 0x10C}, 1}, /* Ccaron */
   };
 
   MergeStrategy strategy = MergeStrategy::CostBased(
@@ -718,8 +718,8 @@ TEST_F(ClosureGlyphSegmenterTest, SimpleSegmentation_PatchMerge) {
                                          {
                                              {'A'},
                                              {'C'},
-                                             {0xC1},  /* Aacute */
-                                             {0x106}, /* Cacute */
+                                             {0xC4},  /* Adieresis */
+                                             {0x10C}, /* Ccaron */
                                          },
                                          strategy);
   ASSERT_TRUE(segmentation.ok()) << segmentation.status();
@@ -727,17 +727,19 @@ TEST_F(ClosureGlyphSegmenterTest, SimpleSegmentation_PatchMerge) {
   std::vector<SubsetDefinition> expected_segments = {
       {'A'},
       {'C'},
-      {0xC1, 0x106},
-      {},
+      {0xC4},
+      {0x10C},
   };
   ASSERT_EQ(segmentation->Segments(), expected_segments);
 
   ASSERT_EQ(segmentation->ToString(),
             R"(initial font: { gid0 }
-p0: { gid117, gid169, gid640, gid700 }
-p1: { gid37, gid39 }
+p0: { gid106, gid643 }
+p1: { gid159, gid706 }
+p2: { gid37, gid39 }
 if (s2) then p0
-if ((s0 OR s1 OR s2)) then p1
+if (s3) then p1
+if ((s0 OR s1 OR s2 OR s3)) then p2
 )");
 }
 
@@ -745,8 +747,8 @@ TEST_F(ClosureGlyphSegmenterTest, SimpleSegmentation_NoPatchMerge) {
   UnicodeFrequencies frequencies{
       {{'A', 'A'}, 1000},
       {{'C', 'C'}, 1000},
-      {{0xC1, 0xC1}, 1},   /* Aacute */
-      {{0x106, 0x106}, 1}, /* Cacute */
+      {{0xC4, 0xC4}, 1},   /* Adieresis */
+      {{0x10C, 0x10C}, 1}, /* Ccaron */
   };
 
   MergeStrategy strategy = MergeStrategy::CostBased(
@@ -759,8 +761,8 @@ TEST_F(ClosureGlyphSegmenterTest, SimpleSegmentation_NoPatchMerge) {
                                          {
                                              {'A'},
                                              {'C'},
-                                             {0xC1},  /* Aacute */
-                                             {0x106}, /* Cacute */
+                                             {0xC4},  /* Adieresis */
+                                             {0x10C}, /* Ccaron */
                                          },
                                          strategy);
   ASSERT_TRUE(segmentation.ok()) << segmentation.status();
@@ -768,19 +770,21 @@ TEST_F(ClosureGlyphSegmenterTest, SimpleSegmentation_NoPatchMerge) {
   std::vector<SubsetDefinition> expected_segments = {
       {'A'},
       {'C'},
-      {0xC1, 0x106},
-      {},
+      {0xC4},
+      {0x10C},
   };
   ASSERT_EQ(segmentation->Segments(), expected_segments);
 
   ASSERT_EQ(segmentation->ToString(),
             R"(initial font: { gid0 }
-p0: { gid117, gid169, gid640, gid700 }
-p1: { gid37 }
-p2: { gid39 }
+p0: { gid106, gid643 }
+p1: { gid159, gid706 }
+p2: { gid37 }
+p3: { gid39 }
 if (s2) then p0
-if ((s0 OR s2)) then p1
-if ((s1 OR s2)) then p2
+if (s3) then p1
+if ((s0 OR s2)) then p2
+if ((s1 OR s3)) then p3
 )");
 }
 
@@ -2066,19 +2070,22 @@ TEST_F(ClosureGlyphSegmenterTest, InitFontMergingAndFindConditions) {
 
   // s0, s1, and s2 promote to the initial font segment. s0 has no remaining
   // patches and is cleared, while s1 and s2 still participate in unmoved
-  // joining conditions and are merged into s3 to reach min_group_size = 4.
+  // joining conditions and stay separate from s3 + s4 (which have exclusive
+  // patches and merge to reach min_group_size = 4).
   EXPECT_EQ(segmentation->InitialFontSegment().codepoints,
             (CodepointSet{0x20, 0x62a, 0x62b}));
   std::vector<SubsetDefinition> expected_segments = {
-      {}, {}, {}, {0x62a, 0x62b, 0x62c, 0x62d}, {},
+      {}, {0x62a}, {0x62b}, {0x62c, 0x62d}, {},
   };
   ASSERT_EQ(segmentation->Segments(), expected_segments);
 
   ASSERT_EQ(
       segmentation->ToString(),
       R"(initial font: { gid0, gid1, gid3, gid4, gid9, gid10, gid12, gid13, gid24, gid30, gid38, gid39, gid57, gid59, gid62, gid64, gid68, gid77, gid139, gid140, gid153, gid155, gid156, gid172, gid174 }
-p0: { gid5, gid6, gid11, gid14, gid33, gid47, gid60, gid73, gid74, gid75, gid76, gid83, gid91, gid111, gid112, gid145, gid149, gid152, gid157, gid158, gid190, gid191 }
+p0: { gid5, gid6, gid14, gid33, gid60, gid91, gid112, gid145, gid152, gid157, gid158, gid190, gid191 }
+p1: { gid11, gid47, gid73, gid74, gid75, gid76, gid83, gid111, gid149 }
 if (s3) then p0
+if ((s1 OR s2) AND s3) then p1
 )");
 }
 
@@ -3935,7 +3942,7 @@ TEST_F(ClosureGlyphSegmenterTest,
 
   ASSERT_TRUE(context.MoveGlyphsToInitFont({gid_a, gid_f, gid_i}).ok());
   context.AddToInitFontSegment({'a', 'f', 'i'});
-  context.ClearUnusedInitSegments({0});
+  ASSERT_TRUE(context.ClearUnusedInitSegments({0}).ok());
 
   // Conjunctive 'fi' condition (s1 AND s2) must remain unweakened even though
   // gid_f, gid_i, 'f', and 'i' were moved to the initial font.
@@ -4107,7 +4114,7 @@ TEST_F(ClosureGlyphSegmenterTest,
     ASSERT_TRUE(context.MoveGlyphsToInitFont(s0_non_a_glyphs).ok());
     ASSERT_TRUE(context.glyph_groupings.ExclusiveGlyphs(0).empty());
 
-    context.PromoteInitFontSegments({0, 1, 2});
+    ASSERT_TRUE(context.PromoteInitFontSegments({0, 1, 2}).ok());
     EXPECT_FALSE(
         context.SegmentationInfo().InitFontSegment().codepoints.contains(
             0x00E1));
@@ -4118,7 +4125,7 @@ TEST_F(ClosureGlyphSegmenterTest,
         (CodepointSet{0x00E1}));
 
     ASSERT_TRUE(context.MoveGlyphsToInitFont({gid_a}).ok());
-    context.PromoteInitFontSegments({0, 1, 2});
+    ASSERT_TRUE(context.PromoteInitFontSegments({0, 1, 2}).ok());
     EXPECT_TRUE(
         context.SegmentationInfo().InitFontSegment().codepoints.contains(
             0x00E1));
@@ -4201,6 +4208,160 @@ TEST_F(ClosureGlyphSegmenterTest,
   EXPECT_EQ(count_segment(cpsp), 1);
   EXPECT_EQ(count_segment(smcp), 1);
   EXPECT_EQ(count_segment(SubsetDefinition{'a'}), 1);
+}
+
+TEST_F(
+    ClosureGlyphSegmenterTest,
+    InitFontMerging_ZeroExclusiveGlyphSegmentsMergeForOptionalFeaturePatches) {
+  SubsetDefinition smcp;
+  smcp.feature_tags.insert(HB_TAG('s', 'm', 'c', 'p'));
+
+  UnicodeFrequencies frequencies{
+      {{' ', ' '}, 100}, {{'a', 'a'}, 98}, {{'b', 'b'}, 98},
+      {{'c', 'c'}, 98},  {{'d', 'd'}, 98}, {{'z', 'z'}, 1},
+  };
+  auto profile = ProbabilityProfile::Unigram(std::move(frequencies)).value();
+  profile.init_font_merge_threshold = -70.0;
+  MergeStrategy strategy = MergeStrategy::CostBased(std::move(profile), 75, 4);
+  strategy.SetUsePatchMerges(false);
+
+  auto segmentation = CodepointToGlyphSegments(
+      roboto.get(), {}, {{'a'}, {'b'}, {'c'}, {'d'}, {'z'}, smcp}, strategy);
+  ASSERT_TRUE(segmentation.ok()) << segmentation.status();
+
+  EXPECT_EQ(segmentation->InitialFontSegment().codepoints,
+            (CodepointSet{'a', 'b', 'c', 'd'}));
+  EXPECT_TRUE(segmentation->InitialFontSegment().feature_tags.empty());
+
+  glyph_id_t gid_a = FontHelper::GetNominalGlyph(roboto.get(), 'a').value();
+  glyph_id_t gid_b = FontHelper::GetNominalGlyph(roboto.get(), 'b').value();
+  glyph_id_t gid_c = FontHelper::GetNominalGlyph(roboto.get(), 'c').value();
+  glyph_id_t gid_d = FontHelper::GetNominalGlyph(roboto.get(), 'd').value();
+  glyph_id_t gid_z = FontHelper::GetNominalGlyph(roboto.get(), 'z').value();
+
+  EXPECT_TRUE(segmentation->InitialFontGlyphClosure().contains(gid_a));
+  EXPECT_TRUE(segmentation->InitialFontGlyphClosure().contains(gid_b));
+  EXPECT_TRUE(segmentation->InitialFontGlyphClosure().contains(gid_c));
+  EXPECT_TRUE(segmentation->InitialFontGlyphClosure().contains(gid_d));
+  EXPECT_FALSE(segmentation->InitialFontGlyphClosure().contains(gid_z));
+
+  // 'a'..'d' (zero exclusive glyphs) merge via AllPairsMerger into a single
+  // segment while staying separate from 'z' (which still has an exclusive
+  // patch).
+  std::vector<SubsetDefinition> expected_segments = {
+      {'a', 'b', 'c', 'd'}, {}, {}, {}, {'z'}, smcp,
+  };
+  EXPECT_EQ(segmentation->Segments(), expected_segments);
+
+  // Patches: one exclusive patch for 'z', one consolidated (s0 AND s5) patch
+  // for a.smcp..d.smcp, and one (s4 AND s5) patch for z.smcp.
+  EXPECT_EQ(segmentation->GidSegments().size(), 3);
+  bool saw_z_patch = false;
+  bool saw_abcd_smcp_patch = false;
+  bool saw_z_smcp_patch = false;
+  for (const auto& cond : segmentation->Conditions()) {
+    const auto& glyphs = segmentation->GidSegments().at(cond.activated());
+    EXPECT_FALSE(glyphs.intersects(segmentation->InitialFontGlyphClosure()));
+    if (cond == ActivationCondition::exclusive_segment(4, cond.activated())) {
+      saw_z_patch = true;
+      EXPECT_EQ(glyphs, (ift::common::GlyphSet{gid_z}));
+    } else if (cond ==
+               ActivationCondition::and_segments({0, 5}, cond.activated())) {
+      saw_abcd_smcp_patch = true;
+      EXPECT_EQ(glyphs.size(), 4u);
+    } else if (cond ==
+               ActivationCondition::and_segments({4, 5}, cond.activated())) {
+      saw_z_smcp_patch = true;
+      EXPECT_EQ(glyphs.size(), 1u);
+    } else {
+      ADD_FAILURE() << "Unexpected condition: " << cond.ToString();
+    }
+  }
+  EXPECT_TRUE(saw_z_patch);
+  EXPECT_TRUE(saw_abcd_smcp_patch);
+  EXPECT_TRUE(saw_z_smcp_patch);
+}
+
+TEST_F(
+    ClosureGlyphSegmenterTest,
+    InitFontMerging_CompositeCandidatesDoNotMixExclusiveAndNoExclusiveSegments) {
+  // 1. Cost-based QueueCompositeCandidates and CollectCompositeCandidateMerges
+  // must not merge moved zero-exclusive-glyph segments ('/', '2') with
+  // unmoved exclusive-patch segment ('1') despite min_group_size = 4.
+  {
+    hb_face_unique_ptr test_face =
+        from_file("ift/common/testdata/Roboto-Regular.contextual-ligature.ttf");
+    glyph_id_t gid_slash =
+        FontHelper::GetNominalGlyph(test_face.get(), '/').value();
+    glyph_id_t gid_two =
+        FontHelper::GetNominalGlyph(test_face.get(), '2').value();
+    glyph_id_t gid_one =
+        FontHelper::GetNominalGlyph(test_face.get(), '1').value();
+
+    UnicodeFrequencies frequencies{
+        {{'/', '/'}, 1000},
+        {{'2', '2'}, 1000},
+        {{'1', '1'}, 1},
+    };
+    auto profile = ProbabilityProfile::Unigram(std::move(frequencies)).value();
+    profile.init_font_merge_threshold = -10.0;
+    MergeStrategy strategy =
+        MergeStrategy::CostBased(std::move(profile), 75, 4);
+    strategy.SetUsePatchMerges(false);
+
+    auto segmentation = segmenter.CodepointToGlyphSegments(
+        test_face.get(), {}, {{'/'}, {'2'}, {'1'}}, strategy);
+    ASSERT_TRUE(segmentation.ok()) << segmentation.status();
+
+    EXPECT_EQ(segmentation->InitialFontSegment().codepoints,
+              (CodepointSet{'/', '2'}));
+    EXPECT_TRUE(segmentation->InitialFontGlyphClosure().contains(gid_slash));
+    EXPECT_TRUE(segmentation->InitialFontGlyphClosure().contains(gid_two));
+    EXPECT_FALSE(segmentation->InitialFontGlyphClosure().contains(gid_one));
+
+    std::vector<SubsetDefinition> expected_segments = {
+        {'/'},
+        {'2'},
+        {'1'},
+    };
+    EXPECT_EQ(segmentation->Segments(), expected_segments);
+  }
+
+  // 2. Heuristic TryMergingACompositeCondition skips composite merges that mix
+  // exclusive-glyph segment 'i' (s0) with zero-exclusive-glyph segment 'f'
+  // (s2), merging s0 with base segment 'a' (s1) instead.
+  {
+    glyph_id_t gid_f = FontHelper::GetNominalGlyph(roboto.get(), 'f').value();
+    auto context_or = SegmentationContext::InitializeSegmentationContext(
+        roboto.get(), {}, {{{'i'}}, {{'a'}}, {{'f'}}}, DEP_GRAPH_ONLY, 8, 8,
+        resolver);
+    ASSERT_TRUE(context_or.ok()) << context_or.status();
+    SegmentationContext& context = *context_or;
+
+    ASSERT_TRUE(context.MoveGlyphsToInitFont({gid_f}).ok());
+    context.AddToInitFontSegment({'f'});
+
+    SegmentSet all{0, 1, 2};
+    Merger merger =
+        *Merger::New(context, MergeStrategy::Heuristic(10000), all, all);
+    while (true) {
+      auto modified = merger.TryNextMerge();
+      ASSERT_TRUE(modified.ok()) << modified.status();
+      if (!modified->has_value()) {
+        break;
+      }
+      ASSERT_TRUE(context.ReprocessChanged(**modified).ok());
+    }
+
+    auto segmentation_or = context.ToGlyphSegmentation();
+    ASSERT_TRUE(segmentation_or.ok()) << segmentation_or.status();
+    std::vector<SubsetDefinition> expected_segments = {
+        {'a', 'i'},
+        {},
+        {'f'},
+    };
+    EXPECT_EQ(segmentation_or->Segments(), expected_segments);
+  }
 }
 
 }  // namespace ift::encoder

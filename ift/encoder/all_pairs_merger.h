@@ -88,11 +88,19 @@ class AllPairsMerger {
     };
   };
 
+  struct ActiveSegmentState {
+    double probability;
+    bool has_exclusive_glyphs;
+  };
+
   absl::Status Initialize(Merger& merger);
   absl::Status RefreshDirtySegments(Merger& merger);
   bool IsCandidateStale(const QueuedCandidate& candidate) const;
-  bool IsActiveProbSegment(segment_index_t s) const {
-    return active_segment_prob_.at(s).has_value();
+  bool SameActivePartition(segment_index_t u, segment_index_t v) const {
+    const auto& u_state = active_segment_state_.at(u);
+    const auto& v_state = active_segment_state_.at(v);
+    return u_state.has_value() && v_state.has_value() &&
+           u_state->has_exclusive_glyphs == v_state->has_exclusive_glyphs;
   }
   absl::Status UpdateActiveSegment(Merger& merger, segment_index_t s);
   void RemoveActiveSegment(segment_index_t s);
@@ -101,8 +109,9 @@ class AllPairsMerger {
   absl::Status QueueBestCaseCandidate(
       Merger& merger, const ift::common::SegmentSet& merged_segments);
   absl::Status QueueLowerRankedExclusivePairs(
-      Merger& merger,
-      absl::btree_set<ProbOrderedSegment>::const_iterator u_it);
+      Merger& merger, absl::btree_set<ProbOrderedSegment>::const_iterator u_it);
+  absl::Status QueueLowerRankedNoExclusivePairs(
+      Merger& merger, absl::btree_set<ProbOrderedSegment>::const_iterator u_it);
   absl::Status QueueCompositeCandidates(
       Merger& merger,
       const std::optional<ift::common::SegmentSet>& filter_segments =
@@ -130,7 +139,8 @@ class AllPairsMerger {
   ift::common::SegmentSet dirty_bases_;
   ift::common::GlyphSet dirty_glyphs_;
   absl::btree_set<ProbOrderedSegment> active_segments_by_prob_;
-  std::vector<std::optional<double>> active_segment_prob_;
+  absl::btree_set<ProbOrderedSegment> active_no_exclusive_segments_by_prob_;
+  std::vector<std::optional<ActiveSegmentState>> active_segment_state_;
   std::priority_queue<QueuedCandidate, std::vector<QueuedCandidate>,
                       QueuedCandidate::LowerPriority>
       queue_;

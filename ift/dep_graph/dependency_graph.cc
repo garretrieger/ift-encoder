@@ -205,7 +205,7 @@ class TraversalContext {
   void SetReachedToInitFont(const InitialFont& init_font,
                             const flat_hash_set<hb_tag_t>& init_features) {
     reached_glyphs_ = init_font.ClosedInputGlyphs();
-    reached_unicodes_ = init_font.ClosedInputDefinition().codepoints;
+    reached_unicodes_ = init_font.UnsegmentedDefinition().codepoints;
     reached_features_ = init_features;
   }
 
@@ -558,7 +558,7 @@ absl::Status DependencyGraph::HandleOutgoingEdges(
     TRYV(HandleFeatureOutgoingEdges(node.Id(), context));
   } else if (node.IsInitFont()) {
     TRYV(HandleSubsetDefinitionOutgoingEdges(
-        node, segmentation_info_->InitFont().ClosedInputDefinition(), context));
+        node, segmentation_info_->InitFont().UnsegmentedDefinition(), context));
   }
   return absl::OkStatus();
 }
@@ -579,11 +579,11 @@ DependencyGraph::StronglyConnectedComponents(
   CodepointSet non_init_font_codepoints =
       segmentation_info_->FullCodepointClosure();
   non_init_font_codepoints.subtract(
-      segmentation_info_->InitFont().ClosedInputDefinition().codepoints);
+      segmentation_info_->InitFont().UnsegmentedDefinition().codepoints);
 
   flat_hash_set<hb_tag_t> non_init_font_features = full_feature_set_;
   for (hb_tag_t tag :
-       segmentation_info_->InitFont().ClosedInputDefinition().feature_tags) {
+       segmentation_info_->InitFont().UnsegmentedDefinition().feature_tags) {
     non_init_font_features.erase(tag);
   }
 
@@ -814,7 +814,7 @@ StatusOr<Traversal> DependencyGraph::ClosureTraversal(
   if (unicode_filter_ptr == nullptr) {
     non_init_font_codepoints = segmentation_info_->FullCodepointClosure();
     non_init_font_codepoints.subtract(
-        segmentation_info_->InitFont().ClosedInputDefinition().codepoints);
+        segmentation_info_->InitFont().UnsegmentedDefinition().codepoints);
   }
 
   GlyphSet non_init_font_glyphs;
@@ -1166,7 +1166,7 @@ StatusOr<flat_hash_set<hb_tag_t>> DependencyGraph::InitFeatureSet(
     return absl::InternalError("Failed to create subset input object.");
   }
 
-  init_font.ClosedInputDefinition().ConfigureInput(input, face);
+  init_font.UnsegmentedDefinition().ConfigureInput(input, face);
   hb_set_t* features =
       hb_subset_input_set(input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
 

@@ -207,6 +207,11 @@ class Merger {
     return (double)strategy_.ProbabilityProfiles().size();
   }
 
+  // Returns true if `segments` contains both at least one segment with
+  // exclusive glyphs and at least one segment without exclusive glyphs.
+  bool MixesExclusiveAndNonExclusiveSegments(
+      const ift::common::SegmentSet& segments) const;
+
  private:
   Merger(SegmentationContext& context, MergeStrategy strategy,
          ift::common::SegmentSet inscope_segments,

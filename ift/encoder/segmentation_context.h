@@ -274,14 +274,23 @@ class SegmentationContext {
   // condition and have no remaining patch satisfied by that segment alone.
   // Clears any segment whose definition is now contained in the initial font
   // and no longer triggers any remaining patches.
-  void PromoteInitFontSegments(
+  absl::Status PromoteInitFontSegments(
       const ift::common::SegmentSet& eligible_segments);
 
   // Clears segments in `unused_segments` from `SegmentationInfo()` and
-  // `inert_segments_`.
-  void ClearUnusedInitSegments(const ift::common::SegmentSet& unused_segments) {
+  // `inert_segments_`, and updates `dependency_closure_` to reflect their
+  // inclusion in the unsegmented initial font.
+  absl::Status ClearUnusedInitSegments(
+      const ift::common::SegmentSet& unused_segments) {
+    if (unused_segments.empty()) {
+      return absl::OkStatus();
+    }
     segmentation_info_->ClearUnusedInitSegments(unused_segments);
     inert_segments_.subtract(unused_segments);
+    if (dependency_closure_ != nullptr) {
+      TRYV(dependency_closure_->SegmentsClearedToInitFont(unused_segments));
+    }
+    return absl::OkStatus();
   }
 
   /*

@@ -325,7 +325,7 @@ bool IsSatisfiedBySingleSegment(const ActivationCondition& condition,
 
 }  // namespace
 
-void SegmentationContext::PromoteInitFontSegments(
+Status SegmentationContext::PromoteInitFontSegments(
     const SegmentSet& eligible_segments) {
   SegmentSet segments_in_moved_glyphs;
   const auto& all_glyph_conditions = dependency_closure_->AllGlyphConditions();
@@ -367,9 +367,7 @@ void SegmentationContext::PromoteInitFontSegments(
       unused_segments.insert(s);
     }
   }
-  if (!unused_segments.empty()) {
-    ClearUnusedInitSegments(unused_segments);
-  }
+  return ClearUnusedInitSegments(unused_segments);
 }
 
 Status SegmentationContext::ResetSegments(std::vector<Segment> segments) {

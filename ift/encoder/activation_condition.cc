@@ -843,13 +843,14 @@ ActivationCondition ActivationCondition::RemoveIntersectingSubgroups(
   ActivationCondition new_condition = ActivationCondition::True(0);
   new_condition.activated_ = activated_;
   new_condition.encoding_ = encoding_;
-  new_condition.is_exclusive_ = is_exclusive_;
 
   for (const auto& condition_group : conditions_) {
     if (!condition_group.intersects(segments)) {
       new_condition.conditions_.push_back(condition_group);
     }
   }
+  new_condition.is_exclusive_ =
+      is_exclusive_ && !new_condition.conditions_.empty();
 
   // Simplify is not needed as the existing condition will already be simplified
   // and removing sub-groups does not affect simplification.

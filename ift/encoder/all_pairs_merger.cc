@@ -76,32 +76,49 @@ void AllPairsMerger::AssignMergedSegment(const Merger& merger,
 }
 
 void AllPairsMerger::RemoveActiveSegment(segment_index_t s) {
-  auto& prob = active_segment_prob_.at(s);
-  if (prob.has_value()) {
-    active_segments_by_prob_.erase(ProbOrderedSegment{*prob, s});
-    prob = std::nullopt;
+  auto& state = active_segment_state_.at(s);
+  if (!state.has_value()) {
+    return;
   }
+  ProbOrderedSegment key{state->probability, s};
+  if (state->has_exclusive_glyphs) {
+    active_segments_by_prob_.erase(key);
+  } else {
+    active_no_exclusive_segments_by_prob_.erase(key);
+  }
+  state = std::nullopt;
 }
 
 Status AllPairsMerger::UpdateActiveSegment(Merger& merger, segment_index_t s) {
-  RemoveActiveSegment(s);
   if (!merger.CandidateSegments().contains(s) ||
       s >= merger.OptimizationCutoffSegment()) {
+    RemoveActiveSegment(s);
     return absl::OkStatus();
   }
-  uint32_t size = TRY(merger.ExclusivePatchSize(s));
-  if (size == 0) {
-    // TODO(garretrieger): active_segments_by_prob is currently restricted to
-    // just segments with exclusive patches which in turn means we
-    // only consider exclusive segment pairs for merging, should we
-    // consider all segment pairs? or keep this as is relying on composite
-    // condition candidates.
+  const auto& groupings = merger.Context().glyph_groupings;
+  const bool has_exclusive = !groupings.ExclusiveGlyphs(s).empty();
+  if (!has_exclusive &&
+      (merger.Context().GetTargetMode() == config::UNICODE_RANGE ||
+       groupings.TriggeringSegmentToConditions(s).empty())) {
+    RemoveActiveSegment(s);
     return absl::OkStatus();
   }
 
   double prob = TRY(merger.AggregateProbability(s));
-  active_segments_by_prob_.insert(ProbOrderedSegment{prob, s});
-  active_segment_prob_.at(s) = prob;
+  const auto& existing = active_segment_state_.at(s);
+  if (existing.has_value() && existing->probability == prob &&
+      existing->has_exclusive_glyphs == has_exclusive) {
+    return absl::OkStatus();
+  }
+
+  RemoveActiveSegment(s);
+  ProbOrderedSegment entry{prob, s};
+  if (has_exclusive) {
+    active_segments_by_prob_.insert(entry);
+  } else {
+    active_no_exclusive_segments_by_prob_.insert(entry);
+  }
+  active_segment_state_.at(s) = ActiveSegmentState{prob, has_exclusive};
   return absl::OkStatus();
 }
 
@@ -206,6 +223,16 @@ Status AllPairsMerger::QueueLowerRankedExclusivePairs(
   return absl::OkStatus();
 }
 
+Status AllPairsMerger::QueueLowerRankedNoExclusivePairs(
+    Merger& merger, btree_set<ProbOrderedSegment>::const_iterator u_it) {
+  segment_index_t u = u_it->segment_index;
+  for (auto v_it = std::next(u_it);
+       v_it != active_no_exclusive_segments_by_prob_.end(); ++v_it) {
+    TRYV(QueueBestCaseCandidate(merger, SegmentSet{u, v_it->segment_index}));
+  }
+  return absl::OkStatus();
+}
+
 Status AllPairsMerger::QueueCompositeCandidates(
     Merger& merger, const std::optional<SegmentSet>& filter_segments) {
   if (merger.Context().GetTargetMode() == config::UNICODE_RANGE) {
@@ -244,12 +271,16 @@ Status AllPairsMerger::QueueCompositeCandidates(
       continue;
     }
 
+    if (merger.MixesExclusiveAndNonExclusiveSegments(triggering_segments)) {
+      continue;
+    }
+
     if (triggering_segments.size() == 2) {
       segment_index_t u = *triggering_segments.min();
       segment_index_t v = *triggering_segments.max();
-      if (IsActiveProbSegment(u) && IsActiveProbSegment(v)) {
-        // Pairs of active segments are already considered by QueueLowerRankedExclusivePairs()
-        // so don't need to check them again here.
+      if (SameActivePartition(u, v)) {
+        // Pairs of active segments in the same partition are already
+        // considered by QueueLowerRanked{Exclusive,NoExclusive}Pairs().
         continue;
       }
     }
@@ -271,27 +302,39 @@ Status AllPairsMerger::QueueAllCandidates(
          u_it != active_segments_by_prob_.end(); ++u_it) {
       TRYV(QueueLowerRankedExclusivePairs(merger, u_it));
     }
+    for (auto u_it = active_no_exclusive_segments_by_prob_.begin();
+         u_it != active_no_exclusive_segments_by_prob_.end(); ++u_it) {
+      TRYV(QueueLowerRankedNoExclusivePairs(merger, u_it));
+    }
   } else {
     for (segment_index_t d : *dirty_segments) {
-      if (!IsActiveProbSegment(d)) {
+      const auto& state = active_segment_state_.at(d);
+      if (!state.has_value()) {
         continue;
       }
-      double d_prob = *active_segment_prob_.at(d);
-      auto d_it = active_segments_by_prob_.find(ProbOrderedSegment{d_prob, d});
-      if (d_it == active_segments_by_prob_.end()) {
+      double d_prob = state->probability;
+      const auto& active_set = state->has_exclusive_glyphs
+                             ? active_segments_by_prob_
+                             : active_no_exclusive_segments_by_prob_;
+      auto d_it = active_set.find(ProbOrderedSegment{d_prob, d});
+      if (d_it == active_set.end()) {
         return absl::InternalError(
             "Active probability segment missing from ordered set.");
       }
 
-      bool d_is_inert = merger.Context().InertSegments().contains(d);
-      for (auto u_it = active_segments_by_prob_.begin(); u_it != d_it; ++u_it) {
+      bool check_inert = state->has_exclusive_glyphs &&
+                         merger.Context().InertSegments().contains(d);
+      // Queue pairs {u, d} with segments ranked strictly higher than d
+      // ([active_set.begin(), d_it)). Lower-ranked partners in
+      // (d_it, active_set.end()) are queued by QueueLowerRanked*Pairs() below.
+      for (auto u_it = active_set.begin(); u_it != d_it; ++u_it) {
         segment_index_t u = u_it->segment_index;
         if (dirty_segments->contains(u)) {
-          // Pair {u, d} is already queued when processing u's lower-ranked
-          // partners.
+          // Wait for u's own outer-loop iteration so {u, d} is queued once via
+          // u's QueueLowerRanked*Pairs() call.
           continue;
         }
-        if (d_is_inert) {
+        if (check_inert) {
           uint32_t u_size = TRY(merger.ExclusivePatchSize(u));
           double inert_threshold = merger.BestCaseInertProbabilityThreshold(
               u_size, u_it->probability, 0.0);
@@ -302,7 +345,11 @@ Status AllPairsMerger::QueueAllCandidates(
         TRYV(QueueBestCaseCandidate(merger, SegmentSet{u, d}));
       }
 
-      TRYV(QueueLowerRankedExclusivePairs(merger, d_it));
+      if (state->has_exclusive_glyphs) {
+        TRYV(QueueLowerRankedExclusivePairs(merger, d_it));
+      } else {
+        TRYV(QueueLowerRankedNoExclusivePairs(merger, d_it));
+      }
     }
   }
 
@@ -324,7 +371,8 @@ Status AllPairsMerger::Initialize(Merger& merger) {
   dirty_bases_.clear();
   dirty_glyphs_.clear();
   active_segments_by_prob_.clear();
-  active_segment_prob_.assign(num_segments, std::nullopt);
+  active_no_exclusive_segments_by_prob_.clear();
+  active_segment_state_.assign(num_segments, std::nullopt);
   queue_ = {};
 
   for (segment_index_t s : merger.CandidateSegments()) {
@@ -356,7 +404,6 @@ Status AllPairsMerger::RefreshDirtySegments(Merger& merger) {
         dirty_segments_.union_set(c.TriggeringSegments());
       }
     }
-    TRYV(UpdateActiveSegment(merger, base));
   }
   dirty_bases_.clear();
 
@@ -368,9 +415,7 @@ Status AllPairsMerger::RefreshDirtySegments(Merger& merger) {
   ++current_epoch_;
   for (segment_index_t s : dirty_segments_) {
     segment_epoch_.at(s) = current_epoch_;
-    if (IsActiveProbSegment(s) && groupings.ExclusiveGlyphs(s).empty()) {
-      RemoveActiveSegment(s);
-    }
+    TRYV(UpdateActiveSegment(merger, s));
   }
 
   if (phase_ == MERGING) {

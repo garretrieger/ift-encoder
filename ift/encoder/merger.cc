@@ -736,6 +736,24 @@ Status Merger::CollectExclusiveCandidateMerges(
   return absl::OkStatus();
 }
 
+bool Merger::MixesExclusiveAndNonExclusiveSegments(
+    const SegmentSet& segments) const {
+  bool seen_exclusive = false;
+  bool seen_no_exclusive = false;
+  const auto& groupings = context_->glyph_groupings;
+  for (segment_index_t s : segments) {
+    if (groupings.ExclusiveGlyphs(s).empty()) {
+      seen_no_exclusive = true;
+    } else {
+      seen_exclusive = true;
+    }
+    if (seen_exclusive && seen_no_exclusive) {
+      return true;
+    }
+  }
+  return false;
+}
+
 Status Merger::CollectCompositeCandidateMerges(
     uint32_t base_segment_index,
     std::optional<CandidateMerge>& smallest_candidate_merge) {
@@ -786,6 +804,10 @@ Status Merger::CollectCompositeCandidateMerges(
 
     if (triggering_segments.size() == 2) {
       // base + another segment has already been checked by CollectExclusiveCandidateMerges.
+      continue;
+    }
+
+    if (MixesExclusiveAndNonExclusiveSegments(triggering_segments)) {
       continue;
     }
 
@@ -1065,7 +1087,8 @@ StatusOr<std::optional<InvalidationSet>> Merger::TryMergingACompositeCondition(
 
     if (triggering_segments.size() <= 1 ||
         !triggering_segments.contains(base_segment_index) ||
-        !triggering_segments.is_subset_of(candidate_segments_)) {
+        !triggering_segments.is_subset_of(candidate_segments_) ||
+        MixesExclusiveAndNonExclusiveSegments(triggering_segments)) {
       continue;
     }
 
