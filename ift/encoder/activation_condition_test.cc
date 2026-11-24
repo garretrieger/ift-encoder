@@ -1206,4 +1206,35 @@ TEST(ActivationConditionTest, OrAll_ExtractsMultiClauseIntersectionsIntoBase) {
   }
 }
 
+TEST(ActivationConditionTest, SimplifyTwoClausesAndReplaceSegmentsFastPath) {
+  // 2-clause subset and ordering permutations in Simplify().
+  EXPECT_EQ(ActivationCondition::composite_condition({{1, 2}, {1, 2, 3}}, 0),
+            ActivationCondition::or_segments({1, 2}, 0));
+  EXPECT_EQ(ActivationCondition::composite_condition({{1, 2, 3}, {1, 2}}, 0),
+            ActivationCondition::or_segments({1, 2}, 0));
+  EXPECT_EQ(ActivationCondition::composite_condition({{1, 2}, {1, 2}}, 0),
+            ActivationCondition::or_segments({1, 2}, 0));
+  EXPECT_EQ(ActivationCondition::composite_condition({{3, 4}, {1, 2}}, 0),
+            ActivationCondition::composite_condition({{1, 2}, {3, 4}}, 0));
+
+  // 2-segment ReplaceSegments fast path when `other` is absent vs present.
+  auto cond = ActivationCondition::composite_condition({{0, 2}, {1, 2}}, 7);
+  size_t original_hash = cond.Hash();
+  auto unchanged = cond.ReplaceSegments(0, {0, 99});
+  EXPECT_EQ(unchanged, cond);
+  EXPECT_EQ(unchanged.Hash(), original_hash);
+
+  // Replacing {0, 1} -> 0 turns ((0 OR 2) AND (1 OR 2)) into (0 OR 2).
+  EXPECT_EQ(cond.ReplaceSegments(0, {0, 1}).ToString(),
+            "if ((s0 OR s2)) then p7");
+  // When base is the larger index (2 > 0) and {0, 2} -> 2 on
+  // ((0 OR 3) AND (2 OR 3)), result keeps (2 OR 3).
+  auto cond2 = ActivationCondition::composite_condition({{0, 3}, {2, 3}}, 7);
+  EXPECT_EQ(cond2.ReplaceSegments(2, {0, 2}).ToString(),
+            "if ((s2 OR s3)) then p7");
+  // General path when base is outside the replaced 2-segment set.
+  EXPECT_EQ(cond.ReplaceSegments(5, {0, 1}).ToString(),
+            "if ((s2 OR s5)) then p7");
+}
+
 }  // namespace ift::encoder

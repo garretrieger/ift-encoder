@@ -2382,4 +2382,162 @@ TEST_F(CandidateMergeTest, AssessPatchMerge_SharedOutOfScopeClauses) {
   }
 }
 
+TEST_F(
+    CandidateMergeTest,
+    ComputeCostDelta_BestCaseAsymmetricConditionCountsAndNoExclusivePreFilter) {
+  // 1. One-sided ComputeCostDelta<true>: whichever segment in `merged_segments`
+  // has more conditions is chosen as `rep`, so non-colliding conditions on
+  // `rep` are never transformed or queried for patch size. Test both
+  // rep == *min ({0, 1} when s0 has more conditions) and rep == *max ({0, 1}
+  // when s1 has more conditions) using real Roboto segments.
+  for (bool more_on_first : {true, false}) {
+    Segment seg_many = {{'f'}};  // 'f': exclusive, fl ligature, fi ligature (3)
+    Segment seg_few = {{'l'}};   // 'l': exclusive, fl ligature (2)
+    std::vector<Segment> segments =
+        more_on_first ? std::vector<Segment>{seg_many, seg_few, {{'i'}}}
+                      : std::vector<Segment>{seg_few, seg_many, {{'i'}}};
+    segment_index_t many_idx = more_on_first ? 0 : 1;
+    segment_index_t few_idx = more_on_first ? 1 : 0;
+
+    freq::UnicodeFrequencies frequencies{
+        {{' ', ' '}, 100},
+        {{'f', 'f'}, 80},
+        {{'l', 'l'}, 70},
+        {{'i', 'i'}, 40},
+    };
+
+    ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY, resolver);
+    auto context = SegmentationContext::InitializeSegmentationContext(
+        roboto.get(), {}, segments, segmenter.condition_analysis_mode(),
+        segmenter.brotli_quality(),
+        segmenter.init_font_merging_brotli_quality(), resolver);
+    ASSERT_TRUE(context.ok()) << context.status();
+    ASSERT_FALSE(context->InertSegments().contains(many_idx));
+    ASSERT_FALSE(context->InertSegments().contains(few_idx));
+
+    const auto& groupings = context->glyph_groupings;
+    ASSERT_EQ(groupings.TriggeringSegmentToConditions(many_idx).size(), 3u);
+    ASSERT_EQ(groupings.TriggeringSegmentToConditions(few_idx).size(), 2u);
+
+    GlyphSet g_many = groupings.ExclusiveGlyphs(many_idx);
+    GlyphSet g_few = groupings.ExclusiveGlyphs(few_idx);
+    GlyphSet g_fl = groupings.ConditionsAndGlyphs().at(
+        ActivationCondition::and_segments({0, 1}, 0));
+    ASSERT_FALSE(g_many.empty());
+    ASSERT_FALSE(g_few.empty());
+    ASSERT_FALSE(g_fl.empty());
+
+    Merger merger = *Merger::New(
+        *context,
+        MergeStrategy::CostBased(
+            *ProbabilityProfile::Unigram(std::move(frequencies)), 75, 1),
+        all, all);
+
+    auto* size_cache = new MockPatchSizeCache();
+    size_cache->SetPatchSize(g_many, 300);
+    size_cache->SetPatchSize(g_few, 200);
+    size_cache->SetPatchSize(g_fl, 140);
+    context->patch_size_cache.reset(size_cache);
+
+    double p_many = *merger.AggregateProbability(many_idx);
+    double p_few = *merger.AggregateProbability(few_idx);
+    double p_union = *merger.AggregateMergedProbability({0, 1});
+    // Exclusive (many) + (few) + (many AND few) collapse into one exclusive
+    // patch: largest=300, combined_inc - largest_inc = 200 + 140 = 340,
+    // extra = 340 * 0.5 = 170 -> best size = 470.
+    double expected_best = -p_many * (300 + 75) - p_few * (200 + 75) -
+                           (p_many * p_few) * (140 + 75) + p_union * (470 + 75);
+
+    size_cache->ResetCallCount();
+    auto best =
+        CandidateMerge::ComputeCostDelta<true>(merger, {0, 1}, std::nullopt);
+    ASSERT_TRUE(best.ok()) << best.status();
+    EXPECT_NEAR(*best, expected_best, 1e-9);
+    // Only the 3 colliding patches (g_many, g_few, g_fl) are queried;
+    // the non-colliding fi condition on many_idx is skipped.
+    EXPECT_EQ(size_cache->GetPatchSizeCallCount(), 3);
+  }
+
+  // 2. AllPairsMerger non-exclusive neighborhood pre-filter:
+  // s0..s3 have zero exclusive glyphs (exclusive glyphs moved to init font).
+  // s0 and s1 share composite conditions with s2 and collide into (s0 AND s2);
+  // s3 has only a disjoint composite condition with s4 and must never have its
+  // patch size queried during AllPairsMerger pair queuing.
+  {
+    std::vector<Segment> segments = {
+        {{'a'}}, {{'b'}}, {{'c'}}, {{'d'}}, {{'e'}},
+    };
+    freq::UnicodeFrequencies frequencies{
+        {{' ', ' '}, 100}, {{'a', 'a'}, 90}, {{'b', 'b'}, 85},
+        {{'c', 'c'}, 80},  {{'d', 'd'}, 75}, {{'e', 'e'}, 70},
+    };
+
+    ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY, resolver);
+    auto context = SegmentationContext::InitializeSegmentationContext(
+        roboto.get(), {}, segments, segmenter.condition_analysis_mode(),
+        segmenter.brotli_quality(),
+        segmenter.init_font_merging_brotli_quality(), resolver);
+    ASSERT_TRUE(context.ok()) << context.status();
+
+    glyph_id_t gid_a = *FontHelper::GetNominalGlyph(roboto.get(), 'a');
+    glyph_id_t gid_b = *FontHelper::GetNominalGlyph(roboto.get(), 'b');
+    glyph_id_t gid_c = *FontHelper::GetNominalGlyph(roboto.get(), 'c');
+    glyph_id_t gid_d = *FontHelper::GetNominalGlyph(roboto.get(), 'd');
+    glyph_id_t gid_e = *FontHelper::GetNominalGlyph(roboto.get(), 'e');
+    ASSERT_TRUE(
+        context->MoveGlyphsToInitFont({gid_a, gid_b, gid_c, gid_d, gid_e})
+            .ok());
+
+    glyph_id_t gid_g = *FontHelper::GetNominalGlyph(roboto.get(), 'g');
+    glyph_id_t gid_h = *FontHelper::GetNominalGlyph(roboto.get(), 'h');
+    glyph_id_t gid_i = *FontHelper::GetNominalGlyph(roboto.get(), 'i');
+    // Colliding pair: gid_g is (s0 AND s2), gid_h is (s1 AND s2).
+    context->glyph_condition_set.AddAndCondition(gid_g, 0);
+    context->glyph_condition_set.AddAndCondition(gid_g, 2);
+    context->glyph_condition_set.AddAndCondition(gid_h, 1);
+    context->glyph_condition_set.AddAndCondition(gid_h, 2);
+    // Disjoint pair: gid_i is (s3 AND s4).
+    context->glyph_condition_set.AddAndCondition(gid_i, 3);
+    context->glyph_condition_set.AddAndCondition(gid_i, 4);
+    ASSERT_TRUE(context->glyph_groupings
+                    .GroupGlyphs(context->SegmentationInfo(),
+                                 context->glyph_condition_set,
+                                 {gid_g, gid_h, gid_i}, {0, 1, 2, 3, 4})
+                    .ok());
+
+    class FailOnGlyphCache : public MockPatchSizeCache {
+     public:
+      explicit FailOnGlyphCache(glyph_id_t forbidden) : forbidden_(forbidden) {}
+      absl::StatusOr<uint32_t> GetPatchSize(
+          const ift::common::GlyphSet& gids) override {
+        if (gids.contains(forbidden_)) {
+          return absl::InternalError(
+              "Disjoint non-exclusive segment patch unexpectedly queried.");
+        }
+        return MockPatchSizeCache::GetPatchSize(gids);
+      }
+
+     private:
+      glyph_id_t forbidden_;
+    };
+
+    auto* size_cache = new FailOnGlyphCache(gid_i);
+    size_cache->SetPatchSize({gid_g}, 200);
+    size_cache->SetPatchSize({gid_h}, 200);
+    size_cache->SetPatchSize({gid_g, gid_h}, 220);
+    context->patch_size_cache.reset(size_cache);
+
+    MergeStrategy strategy = MergeStrategy::CostBased(
+        *ProbabilityProfile::Unigram(std::move(frequencies)), 75, 1);
+    strategy.SetOptimizationCutoffFraction(0.0);
+
+    Merger merger = *Merger::New(*context, strategy, all, all);
+    auto step1 = merger.TryNextMerge();
+    ASSERT_TRUE(step1.ok()) << step1.status();
+    ASSERT_TRUE(step1->has_value());
+    EXPECT_EQ((*step1)->base_segment, 0u);
+    EXPECT_EQ((*step1)->segments, (SegmentSet{0, 1}));
+  }
+}
+
 }  // namespace ift::encoder

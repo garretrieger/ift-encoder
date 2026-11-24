@@ -318,6 +318,32 @@ StatusOr<double> CandidateMerge::ComputeBestCaseInitFontCostDelta(
   return cost_delta;
 }
 
+// Estimates a merged patch size from the largest input patch and the remaining
+// incremental bytes scaled by the best-case reduction fraction.
+static uint32_t EstimateBestCaseMergedSize(const Merger& merger,
+                                           uint32_t largest_patch_size,
+                                           uint32_t extra_incremental_size) {
+  double reduction_fraction = merger.Strategy().BestCaseSizeReductionFraction();
+  uint32_t extra = std::max(
+      static_cast<uint32_t>(extra_incremental_size * reduction_fraction),
+      Merger::BEST_CASE_MERGE_SIZE_DELTA);
+  return largest_patch_size + extra;
+}
+
+static void MaybeRecordMergedSizeReduction(Merger& merger,
+                                           uint32_t largest_patch_size,
+                                           uint32_t extra_incremental_size,
+                                           uint32_t actual_size) {
+  if (!merger.ShouldRecordMergedSizeReductions() ||
+      extra_incremental_size == 0) {
+    return;
+  }
+  int32_t extra_actual = static_cast<int32_t>(actual_size) -
+                         static_cast<int32_t>(largest_patch_size);
+  merger.RecordMergedSizeReduction(static_cast<double>(extra_actual) /
+                                   static_cast<double>(extra_incremental_size));
+}
+
 template <bool best_case>
 static StatusOr<double> ComputeInertPairCostDelta(
     Merger& merger, const SegmentSet& merged_segments, segment_index_t u,
@@ -340,12 +366,7 @@ static StatusOr<double> ComputeInertPairCostDelta(
 
   uint32_t size = 0;
   if (best_case) {
-    double best_case_reduction_fraction =
-        merger.Strategy().BestCaseSizeReductionFraction();
-    uint32_t extra =
-        std::max((uint32_t)(extra_raw * best_case_reduction_fraction),
-                 Merger::BEST_CASE_MERGE_SIZE_DELTA);
-    size = largest_patch_size + extra;
+    size = EstimateBestCaseMergedSize(merger, largest_patch_size, extra_raw);
   } else {
     GlyphSet combined_glyphs = context.glyph_groupings.ExclusiveGlyphs(u);
     combined_glyphs.union_set(context.glyph_groupings.ExclusiveGlyphs(v));
@@ -354,11 +375,7 @@ static StatusOr<double> ComputeInertPairCostDelta(
       return SumDeltas(absl::MakeSpan(deltas));
     }
     size = TRY(patch_size_cache->GetPatchSize(combined_glyphs));
-    if (merger.ShouldRecordMergedSizeReductions() && extra_raw != 0) {
-      int32_t extra_actual = ((int32_t)size) - largest_patch_size;
-      merger.RecordMergedSizeReduction((double)extra_actual /
-                                       (double)extra_raw);
-    }
+    MaybeRecordMergedSizeReduction(merger, largest_patch_size, extra_raw, size);
   }
 
   double s = (size + per_request_overhead);
@@ -402,6 +419,317 @@ static StatusOr<double> ComputeInertPairCostDelta(
   return cost_delta;
 }
 
+namespace {
+
+struct MergedConditionInfo {
+  const ActivationCondition* first_condition = nullptr;
+  const GlyphSet* first_glyphs = nullptr;
+  uint32_t source_count = 0;
+  bool skip_new_condition = false;
+  GlyphSet glyphs;
+  uint32_t largest_patch_size = 0;
+  uint32_t largest_incremental_size = 0;
+  uint32_t combined_incremental_size = 0;
+};
+
+// Picks the representative segment `rep` that merged segments map onto.
+// In best-case mode, conditions touching only `rep` map to themselves and
+// cannot collide with one another, so choosing the segment with the most
+// conditions minimizes the number of remaining conditions to transform.
+template <bool best_case>
+std::optional<segment_index_t> SelectRepresentativeSegment(
+    const GlyphGroupings& groupings, const SegmentSet& merged_segments) {
+  if constexpr (!best_case) {
+    return *merged_segments.min();
+  }
+
+  std::optional<segment_index_t> rep;
+  size_t max_cond_count = 0;
+  for (segment_index_t s : merged_segments) {
+    size_t count = groupings.TriggeringSegmentToConditions(s).size();
+    if (count > max_cond_count) {
+      max_cond_count = count;
+      rep = s;
+    }
+  }
+  return rep;
+}
+
+// Evaluates the exact or best-case cost delta of merging `merged_segments`,
+// mapping affected activation conditions onto representative segment `rep`.
+template <bool best_case>
+class SegmentMergeCostEvaluator {
+ public:
+  SegmentMergeCostEvaluator(Merger& merger, const SegmentSet& merged_segments,
+                            segment_index_t rep, uint32_t base_overhead)
+      : merger_(merger),
+        groupings_(merger.Context().glyph_groupings),
+        merged_segments_(merged_segments),
+        rep_(rep),
+        unicode_range_mode_(merger.Context().GetTargetMode() ==
+                            config::UNICODE_RANGE),
+        base_overhead_(base_overhead),
+        per_request_overhead_(merger.Strategy().NetworkOverheadCost()) {}
+
+  StatusOr<double> Evaluate(std::optional<double> delta_to_beat) {
+    TRYV(CollectModifiedConditions());
+    if (new_conditions_.empty()) {
+      return 0.0;
+    }
+
+    size_t active_new_count = TRY(FinalizeNewConditions());
+    if (active_new_count == 0) {
+      return 0.0;
+    }
+
+    return ComputeAddedCostsAndSum(active_new_count, delta_to_beat);
+  }
+
+ private:
+  Status CollectModifiedConditions() {
+    if constexpr (best_case) {
+      if (merged_segments_.size() == 2) {
+        segment_index_t u = *merged_segments_.min();
+        segment_index_t v = *merged_segments_.max();
+        segment_index_t other = (rep_ == u) ? v : u;
+        const auto& other_conditions =
+            groupings_.TriggeringSegmentToConditions(other);
+        if (other_conditions.empty()) {
+          return absl::OkStatus();
+        }
+        new_conditions_.reserve(other_conditions.size());
+        for (const ActivationCondition& condition : other_conditions) {
+          TRYV(AddModifiedCondition(&condition, nullptr));
+        }
+        return absl::OkStatus();
+      }
+    }
+
+    std::optional<SegmentSet> other_segments;
+    const SegmentSet* segments_to_scan = &merged_segments_;
+    if constexpr (best_case) {
+      // Conditions touching only `rep_` cannot collide with one another and
+      // are probed directly in FinalizeNewConditions().
+      other_segments = merged_segments_;
+      other_segments->erase(rep_);
+      segments_to_scan = &*other_segments;
+    }
+
+    flat_hash_map<const ActivationCondition*, const GlyphSet*>
+        modified_conditions;
+    TRYV(FindModifiedConditions(merger_, *segments_to_scan,
+                                modified_conditions));
+    if (modified_conditions.empty()) {
+      return absl::OkStatus();
+    }
+
+    new_conditions_.reserve(modified_conditions.size());
+    if constexpr (!best_case) {
+      deltas_.reserve(2 * modified_conditions.size() + 1);
+    }
+    for (const auto& [condition, glyphs] : modified_conditions) {
+      TRYV(AddModifiedCondition(condition, glyphs));
+    }
+    return absl::OkStatus();
+  }
+
+  StatusOr<size_t> FinalizeNewConditions() {
+    size_t active_new_count = 0;
+    for (auto& [c, info] : new_conditions_) {
+      if constexpr (best_case) {
+        // Check whether a condition touching only `rep_` (or exclusive(rep_))
+        // collides with this post-merge condition.
+        TRYV(AddExistingConditionIfPresent(c, info));
+        if (c.IsUnitary()) {
+          TRYV(AddExistingConditionIfPresent(
+              ActivationCondition::exclusive_segment(rep_, 0), info));
+        }
+        if (info.source_count == 1) {
+          // Non-colliding conditions keep their glyph set and cannot shrink, so
+          // their best-case delta contribution is 0.
+          info.skip_new_condition = true;
+          continue;
+        }
+      } else if (info.source_count == 1) {
+        bool was_active_before_merge =
+            (!unicode_range_mode_ || info.first_condition->IsExclusive());
+        if (was_active_before_merge &&
+            info.first_condition->IsUnchangedByMerge(merged_segments_)) {
+          info.skip_new_condition = true;
+          continue;
+        }
+        TRYV(
+            AddRemovedCondition(info.first_condition, info.first_glyphs, info));
+      }
+      active_new_count++;
+    }
+    return active_new_count;
+  }
+
+  StatusOr<double> ComputeAddedCostsAndSum(
+      size_t active_new_count, std::optional<double> delta_to_beat) {
+    size_t max_terms = deltas_.size() + active_new_count;
+    deltas_.reserve(max_terms);
+
+    double initial_magnitude_sum = -current_delta_;
+    double initial_delta = current_delta_;
+
+    for (auto& [c, info] : new_conditions_) {
+      if (info.skip_new_condition) {
+        continue;
+      }
+
+      uint32_t size = TRY(ComputeMergedPatchSize(info));
+      // Because we haven't actuated the merge yet (segments does not reflect
+      // it), AggregateMergedProbability() is needed to correctly compute the
+      // new probability.
+      double p =
+          TRY(merger_.AggregateMergedProbability(c, rep_, merged_segments_));
+      double s = size + per_request_overhead_;
+      double d = p * s;
+      VLOG(1) << "    + (" << p << " * " << s << ") -> " << d << " [new patch "
+              << c.ToString() << "]";
+      deltas_.push_back(d);
+      current_delta_ += d;
+
+      if (delta_to_beat.has_value() && current_delta_ > *delta_to_beat) {
+        double max_error = MaxSumError(max_terms, initial_magnitude_sum,
+                                       initial_delta, current_delta_);
+        if (current_delta_ - max_error > *delta_to_beat) {
+          return absl::CancelledError();
+        }
+      }
+    }
+
+    double cost_delta = SumDeltas(deltas_);
+    VLOG(1) << "    = " << cost_delta;
+    return cost_delta;
+  }
+
+  StatusOr<uint32_t> ComputeMergedPatchSize(const MergedConditionInfo& info) {
+    uint32_t extra_raw =
+        info.combined_incremental_size - info.largest_incremental_size;
+    if constexpr (best_case) {
+      return EstimateBestCaseMergedSize(merger_, info.largest_patch_size,
+                                        extra_raw);
+    }
+    if (info.source_count == 1) {
+      return info.largest_patch_size;
+    }
+    uint32_t size =
+        TRY(merger_.Context().patch_size_cache->GetPatchSize(info.glyphs));
+    MaybeRecordMergedSizeReduction(merger_, info.largest_patch_size, extra_raw,
+                                   size);
+    return size;
+  }
+
+  Status AddModifiedCondition(const ActivationCondition* condition,
+                              const GlyphSet* glyphs) {
+    ActivationCondition updated =
+        condition->ReplaceSegments(rep_, merged_segments_);
+    if (updated.IsExclusive()) {
+      // Clear is exclusive flag so that de-dup happens properly.
+      updated = ActivationCondition::clear_exclusive(std::move(updated));
+    }
+    if (unicode_range_mode_ && !updated.IsUnitary()) {
+      // In unicode range mode non-exclusive patches are dropped from the final
+      // segmentation and do not contribute to total cost. Any condition that
+      // is not unitary after the merge was also non-exclusive before the merge.
+      return absl::OkStatus();
+    }
+
+    auto [it, _] = new_conditions_.try_emplace(std::move(updated));
+    return RecordSourceCondition(it->second, condition, glyphs);
+  }
+
+  Status AddExistingConditionIfPresent(const ActivationCondition& key,
+                                       MergedConditionInfo& info) {
+    const auto& conditions_and_glyphs = groupings_.ConditionsAndGlyphs();
+    auto it = conditions_and_glyphs.find(key);
+    if (it == conditions_and_glyphs.end()) {
+      return absl::OkStatus();
+    }
+    return RecordSourceCondition(info, &it->first, &it->second);
+  }
+
+  Status RecordSourceCondition(MergedConditionInfo& info,
+                               const ActivationCondition* condition,
+                               const GlyphSet* glyphs) {
+    info.source_count++;
+    if (info.source_count == 1) {
+      info.first_condition = condition;
+      info.first_glyphs = glyphs;
+      return absl::OkStatus();
+    }
+    if (info.source_count == 2) {
+      // The previously collected first condition needs to be removed now that
+      // it is merging with this condition.
+      TRYV(AddRemovedCondition(info.first_condition, info.first_glyphs, info));
+    }
+    return AddRemovedCondition(condition, glyphs, info);
+  }
+
+  Status AddRemovedCondition(const ActivationCondition* condition,
+                             const GlyphSet* glyphs,
+                             MergedConditionInfo& info) {
+    if (glyphs == nullptr) {
+      const auto& conditions_and_glyphs = groupings_.ConditionsAndGlyphs();
+      auto glyph_it = conditions_and_glyphs.find(*condition);
+      if (glyph_it == conditions_and_glyphs.end()) {
+        return absl::InternalError(
+            "Condition which should be present wasn't found.");
+      }
+      glyphs = &glyph_it->second;
+    }
+
+    uint32_t patch_size =
+        TRY(merger_.Context().patch_size_cache->GetPatchSize(*glyphs));
+    if (!unicode_range_mode_ || condition->IsExclusive()) {
+      double p = TRY(merger_.AggregateProbability(*condition));
+      double d = p * (patch_size + per_request_overhead_);
+      deltas_.push_back(-d);
+      current_delta_ -= d;
+      VLOG(1) << "    - (" << p << " * " << (patch_size + per_request_overhead_)
+              << ") -> " << d << " [removed patch " << condition->ToString()
+              << "]";
+    }
+
+    if constexpr (!best_case) {
+      if (info.source_count > 1) {
+        info.glyphs.union_set(*glyphs);
+      }
+    }
+
+    uint32_t incremental_size =
+        (patch_size > base_overhead_) ? (patch_size - base_overhead_) : 0;
+    info.largest_patch_size = std::max(info.largest_patch_size, patch_size);
+    info.largest_incremental_size =
+        std::max(info.largest_incremental_size, incremental_size);
+    info.combined_incremental_size += incremental_size;
+    return absl::OkStatus();
+  }
+
+  Merger& merger_;
+  const GlyphGroupings& groupings_;
+  const SegmentSet& merged_segments_;
+  segment_index_t rep_;
+  bool unicode_range_mode_;
+  uint32_t base_overhead_;
+  uint32_t per_request_overhead_;
+
+  // Maps post-merge conditions to the pre-merge conditions and patch metadata
+  // that fold into them.
+  flat_hash_map<ActivationCondition, MergedConditionInfo> new_conditions_;
+
+  // Cost delta contributions are collected here and summed deterministically at
+  // the end because `new_conditions_` is iterated in hash order. See
+  // SumDeltas().
+  std::vector<double> deltas_;
+  double current_delta_ = 0.0;
+};
+
+}  // namespace
+
 template <bool best_case>
 StatusOr<double> CandidateMerge::ComputeCostDelta(
     Merger& merger, const SegmentSet& merged_segments,
@@ -413,9 +741,6 @@ StatusOr<double> CandidateMerge::ComputeCostDelta(
   VLOG(1) << "cost delta for merge of " << merged_segments.ToString() << " = ";
 
   const auto& context = merger.Context();
-  const bool unicode_range_mode =
-      (context.GetTargetMode() == config::UNICODE_RANGE);
-
   if (merged_segments.size() == 2) {
     segment_index_t u = *merged_segments.min();
     segment_index_t v = *merged_segments.max();
@@ -430,179 +755,16 @@ StatusOr<double> CandidateMerge::ComputeCostDelta(
     }
   }
 
-  // These are conditions which will be modified by applying the merge. These
-  // are conditions that intersect merged_segments.
-  //
-  // Map value is the glyphs associated with condition.
-  flat_hash_map<const ActivationCondition*, const GlyphSet*>
-      modified_conditions;
+  std::optional<segment_index_t> rep = SelectRepresentativeSegment<best_case>(
+      context.glyph_groupings, merged_segments);
+  if (!rep.has_value()) {
+    return 0.0;
+  }
 
-  TRYV(FindModifiedConditions(merger, merged_segments, modified_conditions));
-
-  // new_conditions is modified conditions updated to apply the segment merging.
-  // May have less conditions than modified as multiple conditions may merge
-  // together as a result of updating their segments.
-  //
-  // Map value is the set of glyphs and patch size metadata associated with the
-  // new condition.
-  struct Info {
-    const ActivationCondition* first_condition = nullptr;
-    const GlyphSet* first_glyphs = nullptr;
-    uint32_t source_count = 0;
-    bool skip_new_condition = false;
-    GlyphSet glyphs;
-    uint32_t largest_patch_size = 0;
-    uint32_t largest_incremental_size = 0;
-    uint32_t combined_incremental_size = 0;
-  };
-  flat_hash_map<ActivationCondition, Info> new_conditions;
-  new_conditions.reserve(modified_conditions.size());
-
-  segment_index_t base = *merged_segments.min();
-  const auto& patch_size_cache = context.patch_size_cache;
   uint32_t base_overhead = TRY(merger.BasePatchOverhead());
-
-  // Cost delta contributions are collected here and summed at the end rather
-  // than accumulated as we go. modified_conditions and new_conditions are both
-  // iterated in hash order, which is not stable between runs. See SumDeltas().
-  std::vector<double> deltas;
-  deltas.reserve(2 * modified_conditions.size() + 1);
-
-  double current_delta = 0.0;
-  const uint32_t per_request_overhead = merger.Strategy().NetworkOverheadCost();
-
-  auto add_removed_condition = [&](const ActivationCondition* condition,
-                                   const GlyphSet* glyphs,
-                                   Info& info) -> Status {
-    uint32_t patch_size = TRY(patch_size_cache->GetPatchSize(*glyphs));
-    if (!unicode_range_mode || condition->IsExclusive()) {
-      double p = TRY(merger.AggregateProbability(*condition));
-      double d = p * (patch_size + per_request_overhead);
-      deltas.push_back(-d);
-      current_delta -= d;
-      VLOG(1) << "    - (" << p << " * " << (patch_size + per_request_overhead)
-              << ") -> " << d << " [removed patch " << condition->ToString()
-              << "]";
-    }
-
-    if (!best_case && info.source_count > 1) {
-      info.glyphs.union_set(*glyphs);
-    }
-
-    uint32_t incremental_size =
-        (patch_size > base_overhead) ? (patch_size - base_overhead) : 0;
-    info.largest_patch_size = std::max(info.largest_patch_size, patch_size);
-    info.largest_incremental_size =
-        std::max(info.largest_incremental_size, incremental_size);
-    info.combined_incremental_size += incremental_size;
-    return absl::OkStatus();
-  };
-
-  for (const auto& [condition, glyphs] : modified_conditions) {
-    ActivationCondition updated =
-        condition->ReplaceSegments(base, merged_segments);
-    if (updated.IsExclusive()) {
-      // Clear is exclusive flag so that de-dup happens properly
-      updated = ActivationCondition::clear_exclusive(std::move(updated));
-    }
-    if (unicode_range_mode && !updated.IsUnitary()) {
-      // In unicode range mode non-exclusive patches are dropped from the final
-      // segmentation and do not contribute to total cost. Any condition that is
-      // not unitary after the merge was also non-exclusive before the merge.
-      continue;
-    }
-
-    auto [it, did_insert] = new_conditions.try_emplace(std::move(updated));
-
-    auto& info = it->second;
-    if (did_insert) {
-      info.first_condition = condition;
-      info.first_glyphs = glyphs;
-      info.source_count = 1;
-      continue;
-    }
-
-    info.source_count++;
-    if (info.source_count == 2) {
-      // The previously collected first condition needs to be removed now
-      // that it's merging with this condition.
-      TRYV(add_removed_condition(info.first_condition, info.first_glyphs,
-                                 info));
-    }
-    TRYV(add_removed_condition(condition, glyphs, info));
-  }
-
-  for (auto& [c, info] : new_conditions) {
-    if (info.source_count != 1) {
-      continue;
-    }
-    bool was_active_before_merge =
-        (!unicode_range_mode || info.first_condition->IsExclusive());
-    if (best_case ||
-        (was_active_before_merge &&
-         info.first_condition->IsUnchangedByMerge(merged_segments))) {
-      info.skip_new_condition = true;
-      continue;
-    }
-    TRYV(add_removed_condition(info.first_condition, info.first_glyphs, info));
-  }
-
-  double initial_magnitude_sum = -current_delta;
-  double initial_delta = current_delta;
-
-  // Add in cost associated within the new conditions patch pairs.
-  double best_case_reduction_fraction =
-      merger.Strategy().BestCaseSizeReductionFraction();
-  for (auto& [c, info] : new_conditions) {
-    if (info.skip_new_condition) {
-      continue;
-    }
-
-    uint32_t size = 0;
-    if (best_case) {
-      uint32_t extra =
-          info.combined_incremental_size - info.largest_incremental_size;
-      extra = std::max((uint32_t)(extra * best_case_reduction_fraction),
-                       Merger::BEST_CASE_MERGE_SIZE_DELTA);
-      size = info.largest_patch_size + extra;
-    } else if (info.source_count == 1) {
-      size = info.largest_patch_size;
-    } else {
-      size = TRY(patch_size_cache->GetPatchSize(info.glyphs));
-      if (merger.ShouldRecordMergedSizeReductions()) {
-        int32_t extra_raw =
-            info.combined_incremental_size - info.largest_incremental_size;
-        int32_t extra_actual = ((int32_t)size) - info.largest_patch_size;
-        if (extra_raw != 0.0) {
-          merger.RecordMergedSizeReduction((double)extra_actual /
-                                           (double)extra_raw);
-        }
-      }
-    }
-
-    // Because we haven't actuated the merge yet (segments does not reflect
-    // it), AggregateMergedProbability() is needed to correctly compute the new
-    // probability.
-    double p = TRY(merger.AggregateMergedProbability(c, base, merged_segments));
-    double s = (size + per_request_overhead);
-    double d = p * s;
-    VLOG(1) << "    + (" << p << " * " << s << ") -> " << d << " [new patch "
-            << c.ToString() << "]";
-    deltas.push_back(d);
-    current_delta += d;
-
-    if (delta_to_beat.has_value() && current_delta > *delta_to_beat) {
-      double max_error = MaxSumError(deltas.capacity(), initial_magnitude_sum,
-                                     initial_delta, current_delta);
-      if (current_delta - max_error > *delta_to_beat) {
-        return absl::CancelledError();
-      }
-    }
-  }
-
-  double cost_delta = SumDeltas(deltas);
-  VLOG(1) << "    = " << cost_delta;
-  return cost_delta;
+  SegmentMergeCostEvaluator<best_case> evaluator(merger, merged_segments, *rep,
+                                                 base_overhead);
+  return evaluator.Evaluate(delta_to_beat);
 }
 
 template StatusOr<double> CandidateMerge::ComputeCostDelta<true>(

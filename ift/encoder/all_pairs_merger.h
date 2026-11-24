@@ -91,11 +91,14 @@ class AllPairsMerger {
   struct ActiveSegmentState {
     double probability;
     bool has_exclusive_glyphs;
+    bool has_unitary_condition = false;
+    ift::common::SegmentSet condition_neighborhood;
   };
 
   absl::Status Initialize(Merger& merger);
   absl::Status RefreshDirtySegments(Merger& merger);
   bool IsCandidateStale(const QueuedCandidate& candidate) const;
+  bool CanCollideNoExclusivePair(segment_index_t u, segment_index_t v) const;
   bool SameActivePartition(segment_index_t u, segment_index_t v) const {
     const auto& u_state = active_segment_state_.at(u);
     const auto& v_state = active_segment_state_.at(v);

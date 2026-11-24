@@ -104,10 +104,23 @@ Status AllPairsMerger::UpdateActiveSegment(Merger& merger, segment_index_t s) {
     return absl::OkStatus();
   }
 
+  bool has_unitary = false;
+  SegmentSet neighborhood;
+  if (!has_exclusive) {
+    for (const auto& c : groupings.TriggeringSegmentToConditions(s)) {
+      if (c.IsUnitary()) {
+        has_unitary = true;
+      }
+      neighborhood.union_set(c.TriggeringSegments());
+    }
+  }
+
   double prob = TRY(merger.AggregateProbability(s));
-  const auto& existing = active_segment_state_.at(s);
+  auto& existing = active_segment_state_.at(s);
   if (existing.has_value() && existing->probability == prob &&
       existing->has_exclusive_glyphs == has_exclusive) {
+    existing->has_unitary_condition = has_unitary;
+    existing->condition_neighborhood = std::move(neighborhood);
     return absl::OkStatus();
   }
 
@@ -118,8 +131,23 @@ Status AllPairsMerger::UpdateActiveSegment(Merger& merger, segment_index_t s) {
   } else {
     active_no_exclusive_segments_by_prob_.insert(entry);
   }
-  active_segment_state_.at(s) = ActiveSegmentState{prob, has_exclusive};
+  active_segment_state_.at(s) = ActiveSegmentState{
+      prob, has_exclusive, has_unitary, std::move(neighborhood)};
   return absl::OkStatus();
+}
+
+bool AllPairsMerger::CanCollideNoExclusivePair(segment_index_t u,
+                                               segment_index_t v) const {
+  const auto& u_state = active_segment_state_.at(u);
+  const auto& v_state = active_segment_state_.at(v);
+  if (!u_state.has_value() || !v_state.has_value()) {
+    return false;
+  }
+  if (u_state->has_unitary_condition || v_state->has_unitary_condition) {
+    return true;
+  }
+  return u_state->condition_neighborhood.intersects(
+      v_state->condition_neighborhood);
 }
 
 StatusOr<double> AllPairsMerger::NormalizationDivisor(
@@ -228,7 +256,13 @@ Status AllPairsMerger::QueueLowerRankedNoExclusivePairs(
   segment_index_t u = u_it->segment_index;
   for (auto v_it = std::next(u_it);
        v_it != active_no_exclusive_segments_by_prob_.end(); ++v_it) {
-    TRYV(QueueBestCaseCandidate(merger, SegmentSet{u, v_it->segment_index}));
+    segment_index_t v = v_it->segment_index;
+    if (!CanCollideNoExclusivePair(u, v)) {
+      // Disjoint non-exclusive neighborhoods cannot produce condition
+      // collisions, so their best-case cost delta is always 0.
+      continue;
+    }
+    TRYV(QueueBestCaseCandidate(merger, SegmentSet{u, v}));
   }
   return absl::OkStatus();
 }
@@ -332,6 +366,9 @@ Status AllPairsMerger::QueueAllCandidates(
         if (dirty_segments->contains(u)) {
           // Wait for u's own outer-loop iteration so {u, d} is queued once via
           // u's QueueLowerRanked*Pairs() call.
+          continue;
+        }
+        if (!state->has_exclusive_glyphs && !CanCollideNoExclusivePair(u, d)) {
           continue;
         }
         if (check_inert) {

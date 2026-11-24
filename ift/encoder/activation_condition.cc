@@ -8,6 +8,7 @@
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/hash/hash.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -109,6 +110,25 @@ ActivationCondition ActivationCondition::clear_exclusive(
 static void Simplify(std::vector<SegmentSet>& conditions) {
   if (conditions.size() <= 1) return;
 
+  if (conditions.size() == 2) {
+    size_t size_0 = conditions[0].size();
+    size_t size_1 = conditions[1].size();
+    if (size_0 <= size_1) {
+      if (conditions[0].is_subset_of(conditions[1])) {
+        conditions.pop_back();
+        return;
+      }
+    } else if (conditions[1].is_subset_of(conditions[0])) {
+      conditions[0] = std::move(conditions[1]);
+      conditions.pop_back();
+      return;
+    }
+    if (conditions[1] < conditions[0]) {
+      std::swap(conditions[0], conditions[1]);
+    }
+    return;
+  }
+
   // Conditions can be simplified by removing duplicate and/or subset
   // sub-conditions. For example if one sub-condition is a subset of another
   // ((s1) AND (s1 or s2)), then the larger sub-condition (s1 or s2) is not
@@ -125,7 +145,7 @@ static void Simplify(std::vector<SegmentSet>& conditions) {
   // This could utilize a set trie to speed up the check. We would be able to do
   // the processing in a single pass and not require the cleanup loop. size() ==
   // 1 sub groups can be special cased in this approach too.
-  std::vector<uint8_t> redundant(conditions.size(), 0);
+  absl::InlinedVector<uint8_t, 16> redundant(conditions.size(), 0);
   for (size_t i = 0; i < conditions.size(); ++i) {
     if (redundant[i]) continue;
     for (size_t j = i + 1; j < conditions.size(); ++j) {
@@ -824,6 +844,38 @@ ActivationCondition ActivationCondition::ReplaceSegments(
         is_exclusive_ || new_condition.conditions_.size() == 1;
     new_condition.encoding_ = encoding_;
     return new_condition;
+  }
+
+  if (segments.size() == 2) {
+    segment_index_t min_s = *segments.min();
+    segment_index_t max_s = *segments.max();
+    if (base_segment == min_s || base_segment == max_s) {
+      segment_index_t other_segment = (base_segment == min_s) ? max_s : min_s;
+      bool has_other = false;
+      for (const auto& condition_group : conditions_) {
+        if (condition_group.contains(other_segment)) {
+          has_other = true;
+          break;
+        }
+      }
+      if (!has_other) {
+        return *this;
+      }
+
+      ActivationCondition new_condition = *this;
+      for (auto& condition_group : new_condition.conditions_) {
+        if (condition_group.erase(other_segment)) {
+          condition_group.insert(base_segment);
+        }
+      }
+      Simplify(new_condition.conditions_);
+      new_condition.cached_hash_ = std::nullopt;
+      return new_condition;
+    }
+  }
+
+  if (!Intersects(segments)) {
+    return *this;
   }
 
   ActivationCondition new_condition = *this;
