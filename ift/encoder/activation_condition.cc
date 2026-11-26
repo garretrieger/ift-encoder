@@ -107,24 +107,45 @@ ActivationCondition ActivationCondition::clear_exclusive(
   return updated;
 }
 
-static void Simplify(std::vector<SegmentSet>& conditions) {
-  if (conditions.size() <= 1) return;
+namespace {
 
-  if (conditions.size() == 2) {
-    size_t size_0 = conditions[0].size();
-    size_t size_1 = conditions[1].size();
-    if (size_0 <= size_1) {
-      if (conditions[0].is_subset_of(conditions[1])) {
-        conditions.pop_back();
+void SimplifyToSortedIndices(absl::Span<const SegmentSet> clauses,
+                             bool can_have_subsets,
+                             absl::InlinedVector<uint32_t, 32>& out_indices) {
+  out_indices.clear();
+  size_t n = clauses.size();
+  if (n == 0) {
+    return;
+  }
+  if (n == 1) {
+    out_indices.push_back(0);
+    return;
+  }
+  if (!can_have_subsets) {
+    out_indices.reserve(n);
+    for (uint32_t i = 0; i < n; ++i) {
+      out_indices.push_back(i);
+    }
+    std::sort(out_indices.begin(), out_indices.end(),
+              [&](uint32_t a, uint32_t b) { return clauses[a] < clauses[b]; });
+    return;
+  }
+  if (n == 2) {
+    if (clauses[0].size() <= clauses[1].size()) {
+      if (clauses[0].is_subset_of(clauses[1])) {
+        out_indices.push_back(0);
         return;
       }
-    } else if (conditions[1].is_subset_of(conditions[0])) {
-      conditions[0] = std::move(conditions[1]);
-      conditions.pop_back();
+    } else if (clauses[1].is_subset_of(clauses[0])) {
+      out_indices.push_back(1);
       return;
     }
-    if (conditions[1] < conditions[0]) {
-      std::swap(conditions[0], conditions[1]);
+    if (clauses[1] < clauses[0]) {
+      out_indices.push_back(1);
+      out_indices.push_back(0);
+    } else {
+      out_indices.push_back(0);
+      out_indices.push_back(1);
     }
     return;
   }
@@ -135,41 +156,61 @@ static void Simplify(std::vector<SegmentSet>& conditions) {
   // necessary and can be dropped.
 
   // Sort by size to ensure that if A is a subset of B, then A comes before B.
-  std::sort(conditions.begin(), conditions.end(),
-            [](const SegmentSet& a, const SegmentSet& b) {
-              return a.size() < b.size();
-            });
+  absl::InlinedVector<uint32_t, 32> order(n);
+  for (uint32_t i = 0; i < n; ++i) {
+    order[i] = i;
+  }
+  std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+    return clauses[a].size() < clauses[b].size();
+  });
 
   // TODO(garretrieger): a possibly faster approach is to keep a "minimal sets"
   // list and check if each condition is a superset of anything in that list.
   // This could utilize a set trie to speed up the check. We would be able to do
   // the processing in a single pass and not require the cleanup loop. size() ==
   // 1 sub groups can be special cased in this approach too.
-  absl::InlinedVector<uint8_t, 16> redundant(conditions.size(), 0);
-  for (size_t i = 0; i < conditions.size(); ++i) {
+  absl::InlinedVector<uint8_t, 32> redundant(n, 0);
+  for (size_t i = 0; i < n; ++i) {
     if (redundant[i]) continue;
-    for (size_t j = i + 1; j < conditions.size(); ++j) {
+    for (size_t j = i + 1; j < n; ++j) {
       if (redundant[j]) continue;
-      if (conditions[i].is_subset_of(conditions[j])) {
+      if (clauses[order[i]].is_subset_of(clauses[order[j]])) {
         redundant[j] = 1;
       }
     }
   }
 
-  size_t write_index = 0;
-  for (size_t i = 0; i < conditions.size(); ++i) {
-    if (redundant[i]) {
-      continue;
+  out_indices.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    if (!redundant[i]) {
+      out_indices.push_back(order[i]);
     }
-    if (write_index != i) {
-      conditions[write_index] = std::move(conditions[i]);
-    }
-    write_index++;
   }
-  conditions.erase(conditions.begin() + write_index, conditions.end());
+  std::sort(out_indices.begin(), out_indices.end(),
+            [&](uint32_t a, uint32_t b) { return clauses[a] < clauses[b]; });
+}
 
-  // Final sort to normalize the order of conditions.
-  std::sort(conditions.begin(), conditions.end());
+}  // namespace
+
+static void Simplify(std::vector<SegmentSet>& conditions) {
+  if (conditions.size() <= 1) {
+    return;
+  }
+
+  absl::InlinedVector<uint32_t, 32> sorted_indices;
+  SimplifyToSortedIndices(conditions, /*can_have_subsets=*/true,
+                          sorted_indices);
+  if (sorted_indices.size() == conditions.size() &&
+      std::is_sorted(sorted_indices.begin(), sorted_indices.end())) {
+    return;
+  }
+
+  std::vector<SegmentSet> simplified;
+  simplified.reserve(sorted_indices.size());
+  for (uint32_t index : sorted_indices) {
+    simplified.push_back(std::move(conditions[index]));
+  }
+  conditions = std::move(simplified);
 }
 
 ActivationCondition ActivationCondition::And(const ActivationCondition& a,
@@ -811,39 +852,49 @@ bool ActivationCondition::IsUnchangedByMerge(
   return true;
 }
 
+namespace {
+
+struct TouchedClauseSource {
+  uint32_t index;
+  bool modify;
+  bool has_base;
+};
+
+void MergeUntouchedAndTouchedClauses(
+    absl::Span<const uint32_t> untouched_indices,
+    absl::Span<const uint32_t> touched_indices,
+    absl::Span<const SegmentSet> original,
+    std::vector<SegmentSet>&& touched,
+    std::vector<SegmentSet>& out) {
+  out.clear();
+  out.reserve(untouched_indices.size() + touched_indices.size());
+  size_t u = 0;
+  size_t t = 0;
+  while (u < untouched_indices.size() && t < touched_indices.size()) {
+    const SegmentSet& orig_clause = original[untouched_indices[u]];
+    SegmentSet& touched_clause = touched[touched_indices[t]];
+    if (orig_clause < touched_clause) {
+      out.push_back(orig_clause);
+      ++u;
+    } else {
+      out.push_back(std::move(touched_clause));
+      ++t;
+    }
+  }
+  while (u < untouched_indices.size()) {
+    out.push_back(original[untouched_indices[u++]]);
+  }
+  while (t < touched_indices.size()) {
+    out.push_back(std::move(touched[touched_indices[t++]]));
+  }
+}
+
+}  // namespace
+
 ActivationCondition ActivationCondition::ReplaceSegments(
     segment_index_t base_segment, const SegmentSet& segments) const {
   if (IsPurelyConjunctive()) {
-    // Fast path for doing replace on a purely conjunctive condition, skips
-    // simplify since we can easily gaurantee the new condition is already
-    // simplified.
-    ActivationCondition new_condition;
-    new_condition.conditions_.reserve(conditions_.size());
-    bool has_replace = false;
-    bool base_present = false;
-    for (const auto& sub_group : conditions_) {
-      if (sub_group.intersects(segments)) {
-        has_replace = true;
-        continue;
-      }
-      if (sub_group.contains(base_segment)) {
-        base_present = true;
-      }
-      new_condition.conditions_.push_back(sub_group);
-    }
-    if (has_replace && !base_present) {
-      SegmentSet base{base_segment};
-      // Insert to keep the vector sorted.
-      auto it = std::lower_bound(new_condition.conditions_.begin(),
-                                 new_condition.conditions_.end(), base);
-      new_condition.conditions_.insert(it, std::move(base));
-    }
-
-    new_condition.activated_ = activated_;
-    new_condition.is_exclusive_ =
-        is_exclusive_ || new_condition.conditions_.size() == 1;
-    new_condition.encoding_ = encoding_;
-    return new_condition;
+    return ReplaceSegmentsPurelyConjunctive(base_segment, segments);
   }
 
   if (segments.size() == 2) {
@@ -851,42 +902,144 @@ ActivationCondition ActivationCondition::ReplaceSegments(
     segment_index_t max_s = *segments.max();
     if (base_segment == min_s || base_segment == max_s) {
       segment_index_t other_segment = (base_segment == min_s) ? max_s : min_s;
-      bool has_other = false;
-      for (const auto& condition_group : conditions_) {
-        if (condition_group.contains(other_segment)) {
-          has_other = true;
-          break;
-        }
-      }
-      if (!has_other) {
-        return *this;
-      }
-
-      ActivationCondition new_condition = *this;
-      for (auto& condition_group : new_condition.conditions_) {
-        if (condition_group.erase(other_segment)) {
-          condition_group.insert(base_segment);
-        }
-      }
-      Simplify(new_condition.conditions_);
-      new_condition.cached_hash_ = std::nullopt;
-      return new_condition;
+      return ReplaceTwoSegments(base_segment, other_segment);
     }
   }
 
-  if (!Intersects(segments)) {
+  if (segments.empty()) {
     return *this;
   }
 
-  ActivationCondition new_condition = *this;
-  for (auto& condition_group : new_condition.conditions_) {
-    if (condition_group.intersects(segments)) {
-      condition_group.subtract(segments);
-      condition_group.insert(base_segment);
+  // Because `conditions_` is already simplified, any clause touching neither
+  // `segments` nor `base_segment` cannot participate in any new subset relation
+  // after replacing `segments` with `base_segment` (every touched clause
+  // contains `base_segment`). Simplify only the touched clauses and merge them
+  // back with the untouched clauses in sorted order.
+  absl::InlinedVector<uint32_t, 32> untouched_indices;
+  absl::InlinedVector<TouchedClauseSource, 32> touched_sources;
+  bool has_replace = false;
+  for (uint32_t i = 0; i < conditions_.size(); ++i) {
+    bool hits_segments = conditions_[i].intersects(segments);
+    bool has_base = conditions_[i].contains(base_segment);
+    if (!hits_segments && !has_base) {
+      untouched_indices.push_back(i);
+    } else {
+      has_replace = has_replace || hits_segments;
+      touched_sources.push_back({i, hits_segments, has_base});
     }
   }
-  Simplify(new_condition.conditions_);
-  new_condition.cached_hash_ = std::nullopt;
+  if (!has_replace) {
+    return *this;
+  }
+
+  std::vector<SegmentSet> touched;
+  touched.reserve(touched_sources.size());
+  for (const auto& src : touched_sources) {
+    touched.push_back(conditions_[src.index]);
+    if (src.modify) {
+      touched.back().subtract(segments);
+      touched.back().insert(base_segment);
+    }
+  }
+
+  absl::InlinedVector<uint32_t, 32> sorted_touched_indices;
+  SimplifyToSortedIndices(touched, /*can_have_subsets=*/true,
+                          sorted_touched_indices);
+
+  ActivationCondition new_condition;
+  new_condition.activated_ = activated_;
+  new_condition.is_exclusive_ = is_exclusive_;
+  new_condition.encoding_ = encoding_;
+  MergeUntouchedAndTouchedClauses(untouched_indices,
+                                  sorted_touched_indices,
+                                  conditions_,
+                                  std::move(touched),
+                                  new_condition.conditions_);
+  return new_condition;
+}
+
+ActivationCondition ActivationCondition::ReplaceSegmentsPurelyConjunctive(
+    segment_index_t base_segment, const SegmentSet& segments) const {
+  // Fast path for doing replace on a purely conjunctive condition, skips
+  // simplify since we can easily gaurantee the new condition is already
+  // simplified.
+  ActivationCondition new_condition;
+  new_condition.conditions_.reserve(conditions_.size());
+  bool has_replace = false;
+  bool base_present = false;
+  for (const auto& sub_group : conditions_) {
+    if (sub_group.intersects(segments)) {
+      has_replace = true;
+      continue;
+    }
+    if (sub_group.contains(base_segment)) {
+      base_present = true;
+    }
+    new_condition.conditions_.push_back(sub_group);
+  }
+  if (has_replace && !base_present) {
+    SegmentSet base{base_segment};
+    // Insert to keep the vector sorted.
+    auto it = std::lower_bound(new_condition.conditions_.begin(),
+                               new_condition.conditions_.end(), base);
+    new_condition.conditions_.insert(it, std::move(base));
+  }
+
+  new_condition.activated_ = activated_;
+  new_condition.is_exclusive_ =
+      is_exclusive_ || new_condition.conditions_.size() == 1;
+  new_condition.encoding_ = encoding_;
+  return new_condition;
+}
+
+ActivationCondition ActivationCondition::ReplaceTwoSegments(
+    segment_index_t base_segment, segment_index_t other_segment) const {
+  absl::InlinedVector<uint32_t, 32> untouched_indices;
+  absl::InlinedVector<TouchedClauseSource, 32> touched_sources;
+  bool has_other_any = false;
+  bool has_base_any = false;
+  for (uint32_t i = 0; i < conditions_.size(); ++i) {
+    bool has_other = conditions_[i].contains(other_segment);
+    bool has_base = conditions_[i].contains(base_segment);
+    if (!has_other && !has_base) {
+      untouched_indices.push_back(i);
+    } else {
+      has_other_any = has_other_any || has_other;
+      has_base_any = has_base_any || has_base;
+      touched_sources.push_back({i, has_other, has_base});
+    }
+  }
+  if (!has_other_any) {
+    return *this;
+  }
+
+  std::vector<SegmentSet> touched;
+  touched.reserve(touched_sources.size());
+  for (const auto& src : touched_sources) {
+    touched.push_back(conditions_[src.index]);
+    if (src.modify) {
+      touched.back().erase(other_segment);
+      if (!src.has_base) {
+        touched.back().insert(base_segment);
+      }
+    }
+  }
+
+  absl::InlinedVector<uint32_t, 32> sorted_touched_indices;
+  // When `base_segment` did not already appear in any clause, renaming
+  // `other_segment -> base_segment` is bijective and creates no subsets.
+  SimplifyToSortedIndices(touched, /*can_have_subsets=*/has_base_any,
+                          sorted_touched_indices);
+
+  ActivationCondition new_condition;
+  new_condition.activated_ = activated_;
+  new_condition.is_exclusive_ = is_exclusive_;
+  new_condition.encoding_ = encoding_;
+  MergeUntouchedAndTouchedClauses(untouched_indices,
+                                  sorted_touched_indices,
+                                  conditions_,
+                                  std::move(touched),
+                                  new_condition.conditions_);
   return new_condition;
 }
 

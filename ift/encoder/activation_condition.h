@@ -280,6 +280,11 @@ class ActivationCondition {
 
   static ActivationCondition CombineOrMetadata(
       absl::Span<const ActivationCondition* const> conditions);
+  ActivationCondition ReplaceSegmentsPurelyConjunctive(
+      segment_index_t base_segment,
+      const ift::common::SegmentSet& segments) const;
+  ActivationCondition ReplaceTwoSegments(segment_index_t base_segment,
+                                           segment_index_t other_segment) const;
 
   bool is_exclusive_ = false;
   // Represents:

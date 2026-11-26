@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/inlined_vector.h"
+#include "absl/hash/hash.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -432,6 +434,69 @@ struct MergedConditionInfo {
   uint32_t combined_incremental_size = 0;
 };
 
+struct UntouchedSignature {
+  uint32_t clause_count = 0;
+  size_t hash = 0;
+
+  void AddClause(const SegmentSet& clause) {
+    ++clause_count;
+    hash = absl::HashOf(hash, clause.Hash());
+  }
+
+  bool operator==(const UntouchedSignature& other) const = default;
+
+  template <typename H>
+  friend H AbslHashValue(H h, const UntouchedSignature& sig) {
+    return H::combine(std::move(h), sig.clause_count, sig.hash);
+  }
+};
+
+struct SignatureBucket {
+  uint32_t other_count = 0;
+  uint32_t max_source_clauses = 0;
+  bool matched_rep = false;
+};
+
+struct SignatureScanLimits {
+  uint32_t min_clauses = 0;
+  uint32_t max_clauses = UINT32_MAX;
+  uint32_t max_untouched = UINT32_MAX;
+};
+
+template <typename SkipClauseFn, typename IsTouchedFn, typename OnSignatureFn>
+void ForEachConditionSignature(
+    const flat_hash_set<ActivationCondition>& conditions,
+    SignatureScanLimits limits, SkipClauseFn&& skip_clause,
+    IsTouchedFn&& is_touched, OnSignatureFn&& on_signature) {
+  for (const ActivationCondition& c : conditions) {
+    uint32_t num_clauses = static_cast<uint32_t>(c.conditions().size());
+    if (num_clauses < limits.min_clauses || num_clauses > limits.max_clauses) {
+      continue;
+    }
+    UntouchedSignature sig;
+    bool skip = false;
+    for (const SegmentSet& clause : c.conditions()) {
+      if (skip_clause(clause)) {
+        skip = true;
+        break;
+      }
+      if (!is_touched(clause)) {
+        if (sig.clause_count >= limits.max_untouched) {
+          skip = true;
+          break;
+        }
+        sig.AddClause(clause);
+      }
+    }
+    if (skip) {
+      continue;
+    }
+    if (!on_signature(c, sig)) {
+      break;
+    }
+  }
+}
+
 // Picks the representative segment `rep` that merged segments map onto.
 // In best-case mode, conditions touching only `rep` map to themselves and
 // cannot collide with one another, so choosing the segment with the most
@@ -488,47 +553,155 @@ class SegmentMergeCostEvaluator {
  private:
   Status CollectModifiedConditions() {
     if constexpr (best_case) {
-      if (merged_segments_.size() == 2) {
-        segment_index_t u = *merged_segments_.min();
-        segment_index_t v = *merged_segments_.max();
-        segment_index_t other = (rep_ == u) ? v : u;
-        const auto& other_conditions =
-            groupings_.TriggeringSegmentToConditions(other);
-        if (other_conditions.empty()) {
-          return absl::OkStatus();
-        }
-        new_conditions_.reserve(other_conditions.size());
-        for (const ActivationCondition& condition : other_conditions) {
-          TRYV(AddModifiedCondition(&condition, nullptr));
-        }
-        return absl::OkStatus();
-      }
-    }
-
-    std::optional<SegmentSet> other_segments;
-    const SegmentSet* segments_to_scan = &merged_segments_;
-    if constexpr (best_case) {
-      // Conditions touching only `rep_` cannot collide with one another and
-      // are probed directly in FinalizeNewConditions().
-      other_segments = merged_segments_;
-      other_segments->erase(rep_);
-      segments_to_scan = &*other_segments;
+      // In best case evaluation only conditions which collide after modificiation/replacement
+      // contribute non-zero terms to the best case delta. So as an optimization
+      // don't collect conditions which can't possibly collide under the configured
+      // segment replacements.
+      return CollectModifiedConditionsExcludeNonColliding();
     }
 
     flat_hash_map<const ActivationCondition*, const GlyphSet*>
         modified_conditions;
-    TRYV(FindModifiedConditions(merger_, *segments_to_scan,
+    TRYV(FindModifiedConditions(merger_, merged_segments_,
                                 modified_conditions));
     if (modified_conditions.empty()) {
       return absl::OkStatus();
     }
 
     new_conditions_.reserve(modified_conditions.size());
-    if constexpr (!best_case) {
-      deltas_.reserve(2 * modified_conditions.size() + 1);
-    }
+    deltas_.reserve(2 * modified_conditions.size() + 1);
     for (const auto& [condition, glyphs] : modified_conditions) {
       TRYV(AddModifiedCondition(condition, glyphs));
+    }
+    return absl::OkStatus();
+  }
+
+
+  Status CollectModifiedConditionsExcludeNonColliding() {
+    // Every clause not intersecting `merged_segments_` survives
+    // ReplaceSegments(rep_, merged_segments_) unchanged, so two conditions can
+    // only collide post-merge if they share the exact same untouched clauses.
+    // Pre-filter `other_conditions` using `(untouched_count, untouched_hash)`
+    absl::InlinedVector<std::pair<const ActivationCondition*, UntouchedSignature>,
+                        64>
+        candidates;
+    flat_hash_map<UntouchedSignature, SignatureBucket> sig_buckets;
+    std::optional<SegmentSet> other_segments;
+    segment_index_t other_single = 0;
+    const bool is_pair = (merged_segments_.size() == 2);
+
+    const uint32_t max_other_untouched = unicode_range_mode_ ? 0 : UINT32_MAX;
+    auto record_other_candidate = [&](const ActivationCondition& c,
+                                      const UntouchedSignature& sig) {
+      candidates.emplace_back(&c, sig);
+      SignatureBucket& bucket = sig_buckets[sig];
+      ++bucket.other_count;
+      bucket.max_source_clauses =
+          std::max<uint32_t>(bucket.max_source_clauses, c.conditions().size());
+      return true;
+    };
+
+    if (is_pair) {
+      segment_index_t u = *merged_segments_.min();
+      segment_index_t v = *merged_segments_.max();
+      other_single = (rep_ == u) ? v : u;
+      const auto& other_conditions =
+          groupings_.TriggeringSegmentToConditions(other_single);
+      if (other_conditions.empty()) {
+        return absl::OkStatus();
+      }
+      candidates.reserve(other_conditions.size());
+      sig_buckets.reserve(other_conditions.size());
+      ForEachConditionSignature(
+          other_conditions, {.max_untouched = max_other_untouched},
+          [](const SegmentSet&) { return false; },
+          [&](const SegmentSet& clause) {
+            return clause.contains(rep_) || clause.contains(other_single);
+          },
+          record_other_candidate);
+    } else {
+      other_segments = merged_segments_;
+      other_segments->erase(rep_);
+      SegmentSet visited_other_segments;
+      for (segment_index_t s : *other_segments) {
+        ForEachConditionSignature(
+            groupings_.TriggeringSegmentToConditions(s),
+            {.max_untouched = max_other_untouched},
+            [&](const SegmentSet& clause) {
+              // Already collected under an earlier segment in
+              // `other_segments`.
+              return !visited_other_segments.empty() &&
+                     clause.intersects(visited_other_segments);
+            },
+            [&](const SegmentSet& clause) {
+              return clause.intersects(merged_segments_);
+            },
+            record_other_candidate);
+        visited_other_segments.insert(s);
+      }
+    }
+
+    if (candidates.empty()) {
+      return absl::OkStatus();
+    }
+
+    size_t unresolved_sigs = 0;
+    uint32_t min_needed_clauses = UINT32_MAX;
+    uint32_t max_needed_clauses = 0;
+    uint32_t max_needed_untouched = 0;
+    for (const auto& [sig, bucket] : sig_buckets) {
+      if (bucket.other_count == 1) {
+        ++unresolved_sigs;
+        min_needed_clauses = std::min(min_needed_clauses, sig.clause_count + 1);
+        max_needed_clauses =
+            std::max(max_needed_clauses, bucket.max_source_clauses);
+        max_needed_untouched = std::max(max_needed_untouched, sig.clause_count);
+      }
+    }
+
+    if (unresolved_sigs > 0) {
+      // We've so far only checked conditions on others, for buckets with only
+      // 1 count (unresolved sigs) so far may still collide with a condition
+      // from rep_ check these now.
+      ForEachConditionSignature(
+          groupings_.TriggeringSegmentToConditions(rep_),
+          {.min_clauses = min_needed_clauses,
+           .max_clauses = max_needed_clauses,
+           .max_untouched = max_needed_untouched},
+          [&](const SegmentSet& clause) {
+            return is_pair ? clause.contains(other_single)
+                           : clause.intersects(*other_segments);
+          },
+          [&](const SegmentSet& clause) { return clause.contains(rep_); },
+          [&](const ActivationCondition& e, const UntouchedSignature& sig_e) {
+            auto it = sig_buckets.find(sig_e);
+            if (it != sig_buckets.end() && it->second.other_count == 1 &&
+                !it->second.matched_rep &&
+                e.conditions().size() <= it->second.max_source_clauses) {
+              it->second.matched_rep = true;
+              return --unresolved_sigs > 0;
+            }
+            return true;
+          });
+    }
+
+    size_t colliding_count = 0;
+    for (const auto& [c, sig] : candidates) {
+      const SignatureBucket& bucket = sig_buckets.at(sig);
+      if (bucket.other_count >= 2 || bucket.matched_rep) {
+        ++colliding_count;
+      }
+    }
+    if (colliding_count == 0) {
+      return absl::OkStatus();
+    }
+
+    new_conditions_.reserve(colliding_count);
+    for (const auto& [c, sig] : candidates) {
+      const SignatureBucket& bucket = sig_buckets.at(sig);
+      if (bucket.other_count >= 2 || bucket.matched_rep) {
+        TRYV(AddModifiedCondition(c, nullptr));
+      }
     }
     return absl::OkStatus();
   }

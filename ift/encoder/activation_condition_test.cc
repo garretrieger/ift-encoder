@@ -1,6 +1,7 @@
 #include "ift/encoder/activation_condition.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <random>
 #include <utility>
 #include <vector>
@@ -1235,6 +1236,108 @@ TEST(ActivationConditionTest, SimplifyTwoClausesAndReplaceSegmentsFastPath) {
   // General path when base is outside the replaced 2-segment set.
   EXPECT_EQ(cond.ReplaceSegments(5, {0, 1}).ToString(),
             "if ((s2 OR s5)) then p7");
+}
+
+TEST(ActivationConditionTest, ReplaceSegments_IncrementalSimplifyEquivalence) {
+  auto reference_replace = [](const ActivationCondition& cond,
+                              segment_index_t base,
+                              const SegmentSet& segments) {
+    if (cond.IsPurelyConjunctive() || !cond.Intersects(segments)) {
+      return cond.ReplaceSegments(base, segments);
+    }
+    std::vector<SegmentSet> groups;
+    groups.reserve(cond.conditions().size());
+    for (const SegmentSet& g : cond.conditions()) {
+      SegmentSet modified = g;
+      if (modified.intersects(segments)) {
+        modified.subtract(segments);
+        modified.insert(base);
+      }
+      groups.push_back(std::move(modified));
+    }
+    ActivationCondition ref =
+        ActivationCondition::composite_condition(groups, cond.activated());
+    ref.SetEncoding(cond.Encoding());
+    return ref;
+  };
+
+  // Targeted cases exercising untouched clauses interleaved with touched
+  // clauses: subset absorption into/from an existing base_segment clause,
+  // duplicate touched clauses, base outside replaced set, and 3+ segments.
+  {
+    auto cond = ActivationCondition::composite_condition(
+        {{4, 5}, {1, 6}, {0, 6, 7}, {8, 9}}, 3);
+    // {0, 1} -> 0 turns {1, 6} into {0, 6}, which absorbs {0, 6, 7} while
+    // leaving untouched clauses {4, 5} and {8, 9} intact.
+    ActivationCondition actual = cond.ReplaceSegments(0, {0, 1});
+    ActivationCondition expected = reference_replace(cond, 0, {0, 1});
+    EXPECT_EQ(actual.ToString(), expected.ToString());
+    EXPECT_EQ(actual.Hash(), expected.Hash());
+    EXPECT_EQ(actual.ToString(),
+              "if ((s0 OR s6) AND (s4 OR s5) AND (s8 OR s9)) then p3");
+
+    // Reverse direction: unmutated {0, 6} absorbs mutated {1, 6, 7} -> {0, 6, 7}.
+    auto cond_rev = ActivationCondition::composite_condition(
+        {{4, 5}, {0, 6}, {1, 6, 7}, {8, 9}}, 3);
+    actual = cond_rev.ReplaceSegments(0, {0, 1});
+    expected = reference_replace(cond_rev, 0, {0, 1});
+    EXPECT_EQ(actual.ToString(), expected.ToString());
+    EXPECT_EQ(actual.Hash(), expected.Hash());
+
+    // base_segment outside `segments`: {1, 2} -> 100 maps both (s1 OR s3) and
+    // (s2 OR s3) to (s3 OR s100), and absorbs (s1 OR s2 OR s3 OR s100).
+    auto cond_outside = ActivationCondition::composite_condition(
+        {{1, 3}, {2, 3}, {1, 2, 3, 100}, {4, 5}}, 3);
+    actual = cond_outside.ReplaceSegments(100, {1, 2});
+    expected = reference_replace(cond_outside, 100, {1, 2});
+    EXPECT_EQ(actual.ToString(), expected.ToString());
+    EXPECT_EQ(actual.Hash(), expected.Hash());
+
+    // 3-segment replacement.
+    actual = cond.ReplaceSegments(4, {1, 4, 6});
+    expected = reference_replace(cond, 4, {1, 4, 6});
+    EXPECT_EQ(actual.ToString(), expected.ToString());
+    EXPECT_EQ(actual.Hash(), expected.Hash());
+  }
+
+  // Deterministic pseudo-random equivalence sweep across 200 multi-clause CNF
+  // conditions (up to 15 clauses over segments 0..11).
+  uint32_t rng = 0x12345678u;
+  auto next_u32 = [&rng]() {
+    rng = rng * 1664525u + 1013904223u;
+    return rng;
+  };
+  for (int trial = 0; trial < 200; ++trial) {
+    uint32_t num_clauses = 2 + (next_u32() % 14);
+    std::vector<SegmentSet> groups;
+    groups.reserve(num_clauses);
+    for (uint32_t c = 0; c < num_clauses; ++c) {
+      SegmentSet s;
+      uint32_t clause_len = 1 + (next_u32() % 4);
+      for (uint32_t k = 0; k < clause_len; ++k) {
+        s.insert(next_u32() % 12);
+      }
+      groups.push_back(std::move(s));
+    }
+    ActivationCondition cond = ActivationCondition::composite_condition(groups, 0);
+
+    std::vector<std::pair<segment_index_t, SegmentSet>> cases = {
+        {0, SegmentSet{0, 1}},
+        {5, SegmentSet{2, 5}},
+        {11, SegmentSet{1, 3}},
+        {3, SegmentSet{3, 7, 9}},
+        {10, SegmentSet{0, 4, 8}},
+    };
+    for (const auto& [base, segs] : cases) {
+      ActivationCondition actual = cond.ReplaceSegments(base, segs);
+      ActivationCondition expected = reference_replace(cond, base, segs);
+      ASSERT_EQ(actual.ToString(), expected.ToString())
+          << "trial=" << trial << " cond=" << cond.ToString()
+          << " base=" << base << " segs=" << segs.ToString();
+      ASSERT_EQ(actual.IsExclusive(), expected.IsExclusive());
+      ASSERT_EQ(actual.Hash(), expected.Hash());
+    }
+  }
 }
 
 }  // namespace ift::encoder
