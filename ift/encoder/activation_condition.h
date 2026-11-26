@@ -207,6 +207,19 @@ class ActivationCondition {
     return min;
   }
 
+  // Same as EffectiveGroupSize(), but only considers clauses whose segments
+  // are all in `inscope`. Returns UINT32_MAX if there are no in-scope clauses.
+  uint32_t EffectiveGroupSize(const ift::common::SegmentSet& inscope) const {
+    uint32_t min = UINT32_MAX;
+    for (const auto& sub_group : conditions_) {
+      if (!sub_group.empty() && sub_group.is_subset_of(inscope) &&
+          sub_group.size() < min) {
+        min = sub_group.size();
+      }
+    }
+    return min;
+  }
+
   // Compute and return the probability that this condition will be activated
   // based on the provided individual segment probabilities.
   //

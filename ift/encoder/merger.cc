@@ -588,7 +588,8 @@ StatusOr<std::optional<InvalidationSet>> Merger::PatchMergeWithCosts(
   }
 
   std::optional<CandidateMerge> smallest_candidate_merge = std::nullopt;
-  if (base.EffectiveGroupSize() >= strategy_.MinimumGroupSize()) {
+  if (base.EffectiveGroupSize(inscope_segments_) >=
+      strategy_.MinimumGroupSize()) {
     // If minimum group size is met then we can filter non-negative candidates.
     smallest_candidate_merge = CandidateMerge::PatchMergeBaselineCandidate(0.0);
   }

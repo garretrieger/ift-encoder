@@ -2763,4 +2763,191 @@ TEST_F(CandidateMergeTest, PatchMerge_ReturnsEmptyInvalidationSet) {
             g0);
 }
 
+TEST_F(CandidateMergeTest,
+       PatchMerge_OutOfScopeClauseDoesNotBlockMinGroupSizeBaseline) {
+  // Segments s0..s3 are in-scope (each already has 3 codepoints so segment
+  // merging stops at MinimumGroupSize(3)); s4 and s5 are out-of-scope.
+  std::vector<Segment> segments = {
+      {{'A', 'B', 'C'}}, {{'D', 'E', 'G'}}, {{'H', 'J', 'K'}},
+      {{'M', 'N', 'P'}}, {{'Q'}},           {{'R'}},
+  };
+  freq::UnicodeFrequencies frequencies{
+      {{' ', ' '}, 1000}, {{'A', 'A'}, 400}, {{'D', 'D'}, 400},
+      {{'H', 'H'}, 400},  {{'M', 'M'}, 10},  {{'Q', 'Q'}, 300},
+      {{'R', 'R'}, 300},
+  };
+
+  SegmentSet inscope{0, 1, 2, 3};
+  ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY, resolver);
+  auto context = SegmentationContext::InitializeSegmentationContext(
+      roboto.get(), {}, segments, segmenter.condition_analysis_mode(),
+      segmenter.brotli_quality(), segmenter.init_font_merging_brotli_quality(),
+      resolver);
+  ASSERT_TRUE(context.ok()) << context.status();
+
+  glyph_id_t gid_f = *FontHelper::GetNominalGlyph(roboto.get(), 'f');
+  glyph_id_t gid_g = *FontHelper::GetNominalGlyph(roboto.get(), 'g');
+  // Base patch already meets min_group_size = 3 on its in-scope clause, while
+  // sharing a smaller 2-segment out-of-scope clause (s4 OR s5).
+  ActivationCondition cond_base =
+      ActivationCondition::composite_condition({{0, 1, 2}, {4, 5}}, 0);
+  // Candidate has in-scope size 1, so un-scoped EffectiveGroupSize() would see
+  // merged (2) > candidate (1) and accept a positive-cost merge into cond_base.
+  ActivationCondition cond_small =
+      ActivationCondition::composite_condition({{3}, {4, 5}}, 0);
+  context->glyph_condition_set.SetCondition(gid_f, cond_base);
+  context->glyph_condition_set.SetCondition(gid_g, cond_small);
+  ASSERT_TRUE(context->glyph_groupings
+                  .GroupGlyphs(context->SegmentationInfo(),
+                               context->glyph_condition_set, {gid_f, gid_g},
+                               {0, 1, 2, 3, 4, 5})
+                  .ok());
+
+  auto* size_cache = new HighDefaultPatchSizeCache(/*default_size=*/50000);
+  size_cache->SetPatchSize({}, 10);
+  for (const auto& [cond, glyphs] :
+       context->glyph_groupings.ConditionsAndGlyphs()) {
+    size_cache->SetPatchSize(glyphs, cond == cond_base ? 1000 : 100);
+  }
+  size_cache->SetPatchSize({gid_f, gid_g}, 1150);
+  context->patch_size_cache.reset(size_cache);
+
+  MergeStrategy strategy = MergeStrategy::CostBased(
+      *ProbabilityProfile::Unigram(std::move(frequencies)),
+      /*network_overhead_cost=*/75,
+      /*min_group_size=*/3);
+  strategy.SetUsePatchMerges(true);
+  strategy.SetOptimizationCutoffFraction(0.0);
+
+  Merger merger = *Merger::New(*context, strategy, inscope, inscope);
+  auto next = merger.TryNextMerge();
+  ASSERT_TRUE(next.ok()) << next.status();
+  EXPECT_FALSE(next->has_value());
+}
+
+TEST_F(CandidateMergeTest,
+       PatchMerge_OutOfScopeClauseDoesNotSuppressInScopeGroupGrowth) {
+  std::vector<Segment> segments = {
+      {{'A'}}, {{'B'}}, {{'C'}}, {{'D'}}, {{'E'}},
+  };
+  std::vector<std::pair<Segment, double>> probs = {
+      {{{'A'}}, 0.40},          {{{'B'}}, 0.40},
+      {{{'C'}}, 0.40},          {{{'D'}}, 0.40},
+      {{{'E'}}, 0.50},          {{{'A', 'B'}}, 0.60},
+      {{{'C', 'D'}}, 0.60},     {{{'A', 'B', 'C', 'D'}}, 0.90},
+  };
+
+  SegmentSet inscope{0, 1, 2, 3};
+  ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY, resolver);
+  auto context = SegmentationContext::InitializeSegmentationContext(
+      roboto.get(), {}, segments, segmenter.condition_analysis_mode(),
+      segmenter.brotli_quality(), segmenter.init_font_merging_brotli_quality(),
+      resolver);
+  ASSERT_TRUE(context.ok()) << context.status();
+
+  Merger merger = *Merger::New(
+      *context,
+      MergeStrategy::CostBased(
+          ProbabilityProfile(std::make_shared<MockProbabilityCalculator>(probs)),
+          /*network_overhead_cost=*/75,
+          /*min_group_size=*/4),
+      inscope, inscope);
+
+  glyph_id_t gid_f = *FontHelper::GetNominalGlyph(roboto.get(), 'f');
+  glyph_id_t gid_g = *FontHelper::GetNominalGlyph(roboto.get(), 'g');
+  ActivationCondition cond_a =
+      ActivationCondition::composite_condition({{0, 1}, {4}}, 0);
+  ActivationCondition cond_b =
+      ActivationCondition::composite_condition({{2, 3}, {4}}, 0);
+  context->glyph_condition_set.SetCondition(gid_f, cond_a);
+  context->glyph_condition_set.SetCondition(gid_g, cond_b);
+  ASSERT_TRUE(context->glyph_groupings
+                  .GroupGlyphs(context->SegmentationInfo(),
+                               context->glyph_condition_set, {gid_f, gid_g},
+                               {0, 1, 2, 3, 4})
+                  .ok());
+
+  auto* size_cache = new MockPatchSizeCache();
+  size_cache->SetPatchSize({gid_f}, 500);
+  size_cache->SetPatchSize({gid_g}, 500);
+  size_cache->SetPatchSize({gid_f, gid_g}, 900);
+  context->patch_size_cache.reset(size_cache);
+
+  // Even though cost delta is positive (and out-of-scope clause {s4} stays
+  // size 1), the in-scope group size grows from 2 to 4, so the merge must be
+  // allowed when no baseline is provided.
+  auto result =
+      CandidateMerge::AssessPatchMerge(merger, cond_a, cond_b, std::nullopt);
+  ASSERT_TRUE(result.ok()) << result.status();
+  ASSERT_TRUE(result->has_value());
+  EXPECT_GT((*result)->CostDelta(), 0.0);
+}
+
+TEST_F(CandidateMergeTest,
+       AssessPatchMerge_BestCasePrunesNonIncreasingPositiveDelta) {
+  std::vector<Segment> segments = {
+      {{'A'}},
+      {{'B'}},
+      {{'C'}},
+      {{'D'}},
+  };
+  std::vector<std::pair<Segment, double>> probs = {
+      {{{'A'}}, 0.90},       {{{'B'}}, 0.90},       {{{'A', 'B'}}, 0.90},
+      {{{'C'}}, 0.05},       {{{'D'}}, 0.05},       {{{'C', 'D'}}, 0.05},
+  };
+
+  ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY, resolver);
+  auto context = SegmentationContext::InitializeSegmentationContext(
+      roboto.get(), {}, segments, segmenter.condition_analysis_mode(),
+      segmenter.brotli_quality(), segmenter.init_font_merging_brotli_quality(),
+      resolver);
+  ASSERT_TRUE(context.ok()) << context.status();
+
+  Merger merger = *Merger::New(
+      *context,
+      MergeStrategy::CostBased(
+          ProbabilityProfile(std::make_shared<MockProbabilityCalculator>(probs)),
+          /*network_overhead_cost=*/75,
+          /*min_group_size=*/1),
+      all, all);
+
+  glyph_id_t gid_f = *FontHelper::GetNominalGlyph(roboto.get(), 'f');
+  glyph_id_t gid_g = *FontHelper::GetNominalGlyph(roboto.get(), 'g');
+  ActivationCondition cond_a = ActivationCondition::or_segments({0, 1}, 0);
+  ActivationCondition cond_b =
+      ActivationCondition::composite_condition({{0, 1}, {2, 3}}, 0);
+  context->glyph_condition_set.SetCondition(gid_f, cond_a);
+  context->glyph_condition_set.SetCondition(gid_g, cond_b);
+  ASSERT_TRUE(context->glyph_groupings
+                  .GroupGlyphs(context->SegmentationInfo(),
+                               context->glyph_condition_set, {gid_f, gid_g},
+                               {0, 1, 2, 3})
+                  .ok());
+
+  auto* size_cache = new MockPatchSizeCache();
+  size_cache->SetPatchSize({gid_f}, 1000);
+  size_cache->SetPatchSize({gid_g}, 1000);
+  size_cache->SetPatchSize({gid_f, gid_g}, 1600);
+  context->patch_size_cache.reset(size_cache);
+
+  // Merged condition simplifies to cond_a, so effective group size does not
+  // increase (2 -> 2) and best_case_delta (+401.625) >= 0.0 must reject early
+  // without sizing the merged glyph set {gid_f, gid_g}.
+  size_cache->ResetCallCount();
+  auto rejected_no_baseline =
+      CandidateMerge::AssessPatchMerge(merger, cond_a, cond_b, std::nullopt);
+  ASSERT_TRUE(rejected_no_baseline.ok()) << rejected_no_baseline.status();
+  EXPECT_FALSE(rejected_no_baseline->has_value());
+  EXPECT_EQ(size_cache->GetPatchSizeCallCount(), 2u);
+
+  // A positive best_merge_candidate threshold must also clamp down to 0.0 when
+  // group size does not increase.
+  size_cache->ResetCallCount();
+  auto rejected_pos_baseline = CandidateMerge::AssessPatchMerge(
+      merger, cond_a, cond_b, CandidateMerge::PatchMergeBaselineCandidate(1000.0));
+  ASSERT_TRUE(rejected_pos_baseline.ok()) << rejected_pos_baseline.status();
+  EXPECT_FALSE(rejected_pos_baseline->has_value());
+  EXPECT_EQ(size_cache->GetPatchSizeCallCount(), 2u);
+}
+
 }  // namespace ift::encoder

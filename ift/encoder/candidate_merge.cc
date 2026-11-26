@@ -1365,11 +1365,30 @@ StatusOr<std::optional<CandidateMerge>> CandidateMerge::AssessPatchMerge(
     return std::nullopt;
   }
 
-  if (merger.Strategy().UseCosts() && best_merge_candidate.has_value()) {
+  uint32_t merged_group_size =
+      details.merged_condition.EffectiveGroupSize(inscope);
+  uint32_t a_group_size = details.condition_a.EffectiveGroupSize(inscope);
+  uint32_t b_group_size = details.condition_b.EffectiveGroupSize(inscope);
+  bool increases_group_size =
+      merged_group_size > a_group_size || merged_group_size > b_group_size;
+
+  std::optional<double> cost_delta_threshold;
+  if (best_merge_candidate.has_value()) {
+    cost_delta_threshold = best_merge_candidate->CostDelta();
+  }
+  if (!increases_group_size &&
+      (!cost_delta_threshold.has_value() || *cost_delta_threshold > 0.0)) {
+    // Non-negative cost deltas are only accepted when the merge increases the
+    // in-scope effective group size of at least one input.
+    cost_delta_threshold = 0.0;
+  }
+
+  if (merger.Strategy().UseCosts() && cost_delta_threshold.has_value()) {
     // Pre-filter, if possible, with a best case computation to avoid computing
     // the merged patch size.
-    double cost_delta = TRY(details.ComputePatchMergeCostDelta<true>(merger));
-    if (cost_delta >= best_merge_candidate->CostDelta()) {
+    double best_case_delta =
+        TRY(details.ComputePatchMergeCostDelta<true>(merger));
+    if (best_case_delta >= *cost_delta_threshold) {
       return std::nullopt;
     }
   }
@@ -1390,22 +1409,11 @@ StatusOr<std::optional<CandidateMerge>> CandidateMerge::AssessPatchMerge(
     cost_delta = TRY(details.ComputePatchMergeCostDelta<false>(merger));
   }
 
-  if (best_merge_candidate.has_value() &&
-      cost_delta >= best_merge_candidate->CostDelta()) {
-    // Our delta is not smaller, don't bother returning a candidate.
+  if (cost_delta_threshold.has_value() &&
+      cost_delta >= *cost_delta_threshold) {
+    // Our delta is not smaller than the threshold (either the best candidate
+    // so far, or 0.0 when group size does not increase).
     return std::nullopt;
-  }
-
-  if (cost_delta >= 0) {
-    // Only accept a non-negative delta if the merge would also increase group
-    // size of at least one of the inputs
-    uint32_t merged_group_size = details.merged_condition.EffectiveGroupSize();
-    uint32_t a_group_size = details.condition_a.EffectiveGroupSize();
-    uint32_t b_group_size = details.condition_b.EffectiveGroupSize();
-    if (merged_group_size <= a_group_size &&
-        merged_group_size <= b_group_size) {
-      return std::nullopt;
-    }
   }
 
   CandidateMerge candidate;

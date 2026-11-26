@@ -605,6 +605,29 @@ TEST(ActivationConditionTest, EffectiveGroupSize) {
             2);
 }
 
+TEST(ActivationConditionTest, EffectiveGroupSizeWithInscope) {
+  SegmentSet inscope{1, 2, 3, 4, 5};
+  // Out-of-scope and mixed clauses are ignored; only purely in-scope clauses
+  // determine the effective group size.
+  EXPECT_EQ(ActivationCondition::exclusive_segment(5, 0)
+                .EffectiveGroupSize(inscope),
+            1);
+  EXPECT_EQ(ActivationCondition::exclusive_segment(9, 0)
+                .EffectiveGroupSize(inscope),
+            UINT32_MAX);
+  EXPECT_EQ(ActivationCondition::composite_condition(
+                {{0, 9}, {1, 2, 3, 4}, {2, 3, 9}}, 0)
+                .EffectiveGroupSize(inscope),
+            4);
+  EXPECT_EQ(ActivationCondition::composite_condition(
+                {{9, 10}, {1, 2, 3, 4}, {3, 4, 5}, {1, 9}}, 0)
+                .EffectiveGroupSize(inscope),
+            3);
+  EXPECT_EQ(ActivationCondition::composite_condition({{0, 9}, {8, 9}}, 0)
+                .EffectiveGroupSize(inscope),
+            UINT32_MAX);
+}
+
 TEST(ActivationConditionTest, NonCompositeSuperset) {
   EXPECT_EQ(ActivationCondition::True(12).NonCompositeSuperset(),
             ActivationCondition::True(12));
