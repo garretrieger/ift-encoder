@@ -2674,4 +2674,93 @@ TEST_F(CandidateMergeTest, ComputeCostDelta_BestCaseUntouchedClausePreFilter) {
   EXPECT_LE(*best_pair, *exact_pair + 1e-9);
 }
 
+TEST_F(CandidateMergeTest, PatchMerge_ReturnsEmptyInvalidationSet) {
+  std::vector<Segment> segments = {
+      {{'a'}},
+      {{'f', 'b'}},
+      {{'i', 'd'}},
+      {{'l', 'g'}},
+  };
+  freq::UnicodeFrequencies frequencies{
+      {{' ', ' '}, 100}, {{'a', 'a'}, 95}, {{'f', 'f'}, 90},
+      {{'i', 'i'}, 80},  {{'l', 'l'}, 80},
+  };
+
+  ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY, resolver);
+  auto context = SegmentationContext::InitializeSegmentationContext(
+      roboto.get(), {}, segments, segmenter.condition_analysis_mode(),
+      segmenter.brotli_quality(), segmenter.init_font_merging_brotli_quality(),
+      resolver);
+  ASSERT_TRUE(context.ok()) << context.status();
+
+  GlyphSet g0 = context->glyph_groupings.ExclusiveGlyphs(0);
+  ASSERT_FALSE(g0.empty());
+  const ActivationCondition cond_fi =
+      ActivationCondition::and_segments({1, 2}, 0);
+  const ActivationCondition cond_fl =
+      ActivationCondition::and_segments({1, 3}, 0);
+  ASSERT_TRUE(context->glyph_groupings.ConditionsAndGlyphs().contains(cond_fi));
+  ASSERT_TRUE(context->glyph_groupings.ConditionsAndGlyphs().contains(cond_fl));
+  GlyphSet g_fi = context->glyph_groupings.ConditionsAndGlyphs().at(cond_fi);
+  GlyphSet g_fl = context->glyph_groupings.ConditionsAndGlyphs().at(cond_fl);
+  ASSERT_FALSE(g_fi.empty());
+  ASSERT_FALSE(g_fl.empty());
+
+  auto* size_cache = new HighDefaultPatchSizeCache(/*default_size=*/5000);
+  size_cache->SetPatchSize({}, 10);
+  for (const auto& [cond, glyphs] :
+       context->glyph_groupings.ConditionsAndGlyphs()) {
+    size_cache->SetPatchSize(glyphs, 30);
+  }
+  context->patch_size_cache.reset(size_cache);
+
+  MergeStrategy strategy = MergeStrategy::CostBased(
+      *ProbabilityProfile::Unigram(std::move(frequencies)),
+      /*network_overhead_cost=*/75,
+      /*min_group_size=*/1);
+  strategy.SetUsePatchMerges(true);
+  strategy.SetOptimizationCutoffFraction(0.0);
+
+  // Cost-increasing patch merges must stop at PatchMergeBaselineCandidate
+  // instead of returning/applying a baseline, and Apply() rejects baselines.
+  Merger no_merge_merger = *Merger::New(*context, strategy, all, all);
+  auto baseline = CandidateMerge::PatchMergeBaselineCandidate(0.0);
+  EXPECT_TRUE(baseline.IsBaseline());
+  EXPECT_TRUE(absl::IsInternal(baseline.Apply(no_merge_merger).status()));
+  auto none = no_merge_merger.TryNextMerge();
+  ASSERT_TRUE(none.ok()) << none.status();
+  EXPECT_FALSE(none->has_value());
+
+  // Make merging (s1 AND s2) and (s1 AND s3) cost-reducing, and verify both
+  // AssessPatchMerge()/Apply() and Merger::TryNextMerge() return an empty
+  // InvalidationSet with no base_segment.
+  GlyphSet g_fi_fl = g_fi;
+  g_fi_fl.union_set(g_fl);
+  size_cache->SetPatchSize(g_fi_fl, 30);
+
+  Merger merger = *Merger::New(*context, strategy, all, all);
+  auto assessed =
+      CandidateMerge::AssessPatchMerge(merger, cond_fi, cond_fl, baseline);
+  ASSERT_TRUE(assessed.ok()) << assessed.status();
+  ASSERT_TRUE(assessed->has_value());
+  EXPECT_FALSE((*assessed)->IsBaseline());
+
+  const SegmentSet inert_before = context->InertSegments();
+  auto invalidation = merger.TryNextMerge();
+  ASSERT_TRUE(invalidation.ok()) << invalidation.status();
+  ASSERT_TRUE(invalidation->has_value());
+  EXPECT_TRUE((*invalidation)->glyphs.empty());
+  EXPECT_TRUE((*invalidation)->segments.empty());
+  EXPECT_FALSE((*invalidation)->base_segment.has_value());
+
+  ASSERT_TRUE(context->ReprocessChanged(**invalidation).ok());
+  EXPECT_EQ(context->InertSegments(), inert_before);
+  EXPECT_EQ(context->glyph_groupings.ConditionsAndGlyphs().at(
+                ActivationCondition::Or(cond_fi, cond_fl)),
+            g_fi_fl);
+  EXPECT_EQ(context->glyph_groupings.ConditionsAndGlyphs().at(
+                ActivationCondition::exclusive_segment(0, 0)),
+            g0);
+}
+
 }  // namespace ift::encoder

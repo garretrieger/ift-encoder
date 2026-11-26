@@ -22,8 +22,9 @@ struct CandidateMerge {
   friend class CandidateMergeTest;
 
  private:
-  // The segment into which other segments will be merged.
-  segment_index_t base_segment_index_;
+  // The segment into which other segments will be merged. Only set for
+  // segment merges (when merged_segment_ is present).
+  std::optional<segment_index_t> base_segment_index_;
 
   // The set of segments to be merged into the base_segment_index.
   ift::common::SegmentSet segments_to_merge_;
@@ -41,6 +42,8 @@ struct CandidateMerge {
 
   // If true the all of the segments participating in this merge are inert.
   bool input_segments_are_inert_;
+
+  bool is_baseline_ = false;
 
   // Estimated size of the patch after merging.
   uint32_t new_patch_size_;
@@ -63,11 +66,24 @@ struct CandidateMerge {
     merge.base_segment_index_ = base_segment_index;
     merge.segments_to_merge_ = {base_segment_index};
     merge.input_segments_are_inert_ = true;
+    merge.is_baseline_ = true;
     merge.new_patch_size_ = 0;
     merge.cost_delta_ = cost_delta;
     merge.invalidated_glyphs_ = {};
     return merge;
   }
+
+  static CandidateMerge PatchMergeBaselineCandidate(double cost_delta) {
+    CandidateMerge merge;
+    merge.input_segments_are_inert_ = false;
+    merge.is_baseline_ = true;
+    merge.new_patch_size_ = 0;
+    merge.cost_delta_ = cost_delta;
+    merge.invalidated_glyphs_ = {};
+    return merge;
+  }
+
+  bool IsBaseline() const { return is_baseline_; }
 
   const ift::common::SegmentSet& SegmentsToMerge() const {
     return segments_to_merge_;

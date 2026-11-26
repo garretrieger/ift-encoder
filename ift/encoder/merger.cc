@@ -590,7 +590,7 @@ StatusOr<std::optional<InvalidationSet>> Merger::PatchMergeWithCosts(
   std::optional<CandidateMerge> smallest_candidate_merge = std::nullopt;
   if (base.EffectiveGroupSize() >= strategy_.MinimumGroupSize()) {
     // If minimum group size is met then we can filter non-negative candidates.
-    smallest_candidate_merge = CandidateMerge::BaselineCandidate(0, 0.0);
+    smallest_candidate_merge = CandidateMerge::PatchMergeBaselineCandidate(0.0);
   }
 
   for (const auto& [next, probability] : ordered_candidates) {
@@ -623,7 +623,7 @@ StatusOr<std::optional<InvalidationSet>> Merger::PatchMergeWithCosts(
   }
 
   if (!smallest_candidate_merge.has_value() ||
-      smallest_candidate_merge->SegmentsToMerge() == SegmentSet{0}) {
+      smallest_candidate_merge->IsBaseline()) {
     // baseline was not beat, so don't apply.
     return std::nullopt;
   }

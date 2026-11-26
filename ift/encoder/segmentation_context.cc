@@ -238,18 +238,26 @@ void SegmentationContext::LogSegmentCodepointCountHistogram(
 }
 
 Status SegmentationContext::ReprocessChanged(InvalidationSet modified) {
-  GlyphSet affected =
-      dependency_closure_->SegmentsToAffectedGlyphs({modified.base_segment});
-  affected.intersect(TargetGlyphs());
-  modified.glyphs.union_set(affected);
-  TransferDependencyGraphGlyphConditions(modified.glyphs);
+  if (modified.base_segment.has_value()) {
+    GlyphSet affected =
+        dependency_closure_->SegmentsToAffectedGlyphs({*modified.base_segment});
+    affected.intersect(TargetGlyphs());
+    modified.glyphs.union_set(affected);
+  }
+  if (!modified.glyphs.empty()) {
+    TransferDependencyGraphGlyphConditions(modified.glyphs);
+  }
 
   TRYV(GroupGlyphs(modified.glyphs, modified.segments));
-  inert_segments_.subtract(modified.segments);
-  if (IsSegmentInert(modified.base_segment)) {
-    inert_segments_.insert(modified.base_segment);
-  } else {
-    inert_segments_.erase(modified.base_segment);
+  if (!modified.segments.empty()) {
+    inert_segments_.subtract(modified.segments);
+  }
+  if (modified.base_segment.has_value()) {
+    if (IsSegmentInert(*modified.base_segment)) {
+      inert_segments_.insert(*modified.base_segment);
+    } else {
+      inert_segments_.erase(*modified.base_segment);
+    }
   }
   return absl::OkStatus();
 }

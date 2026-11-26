@@ -103,37 +103,47 @@ StatusOr<bool> CandidateMerge::IsPatchTooSmall(
 }
 
 StatusOr<InvalidationSet> CandidateMerge::Apply(Merger& merger) {
-  if (!merged_segment_.has_value()) {
-    TRYV(ApplyPatchMerge(merger));
-    return InvalidationSet(base_segment_index_);
+  if (is_baseline_) {
+    return absl::InternalError("Cannot apply a baseline CandidateMerge.");
   }
 
+  if (!merged_segment_.has_value()) {
+    TRYV(ApplyPatchMerge(merger));
+    return InvalidationSet::Empty();
+  }
+
+  if (!base_segment_index_.has_value()) {
+    return absl::InternalError(
+        "base_segment_index_ is not set for segment merge");
+  }
+  segment_index_t base_segment_index = *base_segment_index_;
+
   SegmentSet segments_to_merge_with_base = segments_to_merge_;
-  segments_to_merge_with_base.insert(base_segment_index_);
+  segments_to_merge_with_base.insert(base_segment_index);
 
   const auto& segments = merger.Context().SegmentationInfo().Segments();
   uint32_t size_before =
-      segments[base_segment_index_].Definition().codepoints.size();
+      segments[base_segment_index].Definition().codepoints.size();
   uint32_t size_after =
-      merger.AssignMergedSegment(base_segment_index_, segments_to_merge_,
+      merger.AssignMergedSegment(base_segment_index, segments_to_merge_,
                                  *merged_segment_, input_segments_are_inert_);
 
   VLOG(0) << "  Merged " << size_before << " codepoints up to " << size_after
-          << " codepoints for segment " << base_segment_index_ << "."
+          << " codepoints for segment " << base_segment_index << "."
           << std::endl
           << "  New patch size " << new_patch_size_ << " bytes. " << std::endl
           << "  Cost delta is " << cost_delta_ << "." << std::endl
           << "  New average probability is "
-          << (TRY(merger.AggregateProbability(base_segment_index_)) /
+          << (TRY(merger.AggregateProbability(base_segment_index)) /
               merger.MaxAggregateProbability());
 
   // Regardless of wether the new segment is inert all of the information
   // associated with the segments removed by the merge should be removed.
   TRYV(merger.Context().InvalidateGlyphInformationForMerge(
-      invalidated_glyphs_, segments_to_merge_with_base, base_segment_index_));
+      invalidated_glyphs_, segments_to_merge_with_base, base_segment_index));
 
   return InvalidationSet(invalidated_glyphs_, segments_to_merge_,
-                         base_segment_index_);
+                         base_segment_index);
 }
 
 Status CandidateMerge::ApplyPatchMerge(Merger& merger) {
@@ -1399,7 +1409,6 @@ StatusOr<std::optional<CandidateMerge>> CandidateMerge::AssessPatchMerge(
   }
 
   CandidateMerge candidate;
-  candidate.base_segment_index_ = 0;  // Dummy value, not used for patch merges.
   candidate.segments_to_merge_ = condition_a.TriggeringSegments();
   candidate.segments_to_merge_.union_set(condition_b.TriggeringSegments());
   candidate.patch_merge_target_conditions_ = std::make_pair(
