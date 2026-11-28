@@ -11,6 +11,7 @@
 #include "ift/encoder/glyph_closure_cache.h"
 #include "ift/encoder/init_subset_defaults.h"
 #include "ift/encoder/segment.h"
+#include "ift/encoder/segment_list.h"
 #include "ift/encoder/subset_definition.h"
 #include "ift/encoder/types.h"
 
@@ -35,18 +36,15 @@ class RequestedSegmentationInformation {
   uint32_t AssignMergedSegment(segment_index_t base,
                                const ift::common::SegmentSet& to_merge,
                                const Segment& merged_segment) {
-    auto& base_segment = segments_[base];
-    RemoveFromIndex(base, base_segment.Definition().codepoints);
-    base_segment = merged_segment;
-    AddToIndex(base, base_segment.Definition().codepoints);
-
+    RemoveFromIndex(base, segments_->at(base).Definition().codepoints);
     for (segment_index_t s : to_merge) {
       // To avoid changing the indices of other segments set the ones we're
       // removing to empty sets. That effectively disables them.
-      RemoveFromIndex(s, segments_[s].Definition().codepoints);
-      segments_[s].Clear();
+      RemoveFromIndex(s, segments_->at(s).Definition().codepoints);
     }
-    return base_segment.Definition().codepoints.size();
+    segments_->AssignMerged(base, to_merge, merged_segment);
+    AddToIndex(base, segments_->at(base).Definition().codepoints);
+    return segments_->at(base).Definition().codepoints.size();
   }
 
   void ResetSegments(std::vector<Segment> segments);
@@ -88,11 +86,15 @@ class RequestedSegmentationInformation {
 
   bool SegmentsAreDisjoint() const { return segments_disjoint_; }
 
-  const std::vector<Segment>& Segments() const { return segments_; }
+  const SegmentList& Segments() const { return *segments_; }
+
+  std::shared_ptr<const SegmentList> SharedSegments() const {
+    return segments_;
+  }
 
   const std::vector<SubsetDefinition> SegmentSubsetDefinitions() const {
     std::vector<SubsetDefinition> out;
-    for (const auto& s : segments_) {
+    for (const auto& s : *segments_) {
       out.push_back(s.Definition());
     }
     return out;
@@ -134,7 +136,7 @@ class RequestedSegmentationInformation {
   void RemoveFromIndex(segment_index_t seg_idx,
                        const ift::common::CodepointSet& codepoints);
 
-  std::vector<Segment> segments_;
+  std::shared_ptr<SegmentList> segments_;
   SubsetDefinition init_font_segment_;
   SubsetDefinition full_definition_;
   ift::common::GlyphSet full_closure_;

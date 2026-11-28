@@ -1,21 +1,29 @@
 #ifndef IFT_FREQ_BIGRAM_PROBABILITY_CALCULATOR_H_
 #define IFT_FREQ_BIGRAM_PROBABILITY_CALCULATOR_H_
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
 #include "absl/container/btree_set.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "hb.h"
 #include "ift/common/int_set.h"
+#include "ift/encoder/segment_list.h"
+#include "ift/encoder/subset_definition.h"
 #include "ift/freq/lru_cache.h"
 #include "ift/freq/probability_bound.h"
 #include "ift/freq/probability_calculator.h"
-#include "ift/freq/segment_probability_cache.h"
 #include "ift/freq/unicode_frequencies.h"
 
 namespace ift::freq {
 
 constexpr size_t BIGRAM_PROBABILITY_CACHE_SIZE = 300000;
+
+class BigramSegmentProbabilityCalculator;
 
 // The BigramProbabilityCalculator uses unigram and bigram codepoint frequency
 // data to compute probability bounds for codepoint sets. Unlike the unigram
@@ -29,9 +37,7 @@ class BigramProbabilityCalculator : public ProbabilityCalculator {
       UnicodeFrequencies frequencies,
       size_t max_cache_size = BIGRAM_PROBABILITY_CACHE_SIZE);
 
-  absl::string_view Name() const override {
-    return frequencies_.Name();
-  }
+  absl::string_view Name() const override { return frequencies_.Name(); }
 
   ift::common::CodepointSet CoveredCodepoints() const override {
     return frequencies_.CoveredCodepoints();
@@ -43,26 +49,20 @@ class BigramProbabilityCalculator : public ProbabilityCalculator {
   }
 
   ProbabilityBound ComputeProbability(
-      absl::Span<const ift::encoder::Segment> segments,
-      ift::encoder::segment_index_t segment_index) const override;
-
-  ProbabilityBound ComputeMergedProbability(
-      absl::Span<const ift::encoder::Segment> segments,
-      const ift::common::SegmentSet& segment_indices) const override;
+      const ift::encoder::SubsetDefinition& definition) const override;
 
   ProbabilityBound ComputeConjunctiveProbability(
       const std::vector<ProbabilityBound>& bounds) const override;
 
-  void InvalidateSegmentProbabilities(
-      const ift::common::SegmentSet& segments) const override {
-    segment_cache_.Invalidate(segments);
-  }
-
-  void ResetSegmentProbabilities(size_t num_segments) const override {
-    segment_cache_.Reset(num_segments);
-  }
+ protected:
+  absl::StatusOr<std::unique_ptr<SegmentProbabilityCalculator>>
+  BindToSegmentsImpl(
+      std::shared_ptr<const ProbabilityCalculator> self,
+      std::shared_ptr<const ift::encoder::SegmentList> segments) const override;
 
  private:
+  friend class BigramSegmentProbabilityCalculator;
+
   struct BigramSegmentCacheEntry {
     ProbabilityBound codepoints_bound;
     ProbabilityBound bound;
@@ -74,32 +74,23 @@ class BigramProbabilityCalculator : public ProbabilityCalculator {
     double max_single_bound = 0.0;
     double max_pair_bound = 0.0;
     bool saturated = false;
+    bool has_feature_tags = false;
   };
-
-  ProbabilityBound BigramProbabilityBound(
-      const ift::common::CodepointSet& codepoints,
-      double current_best_lower) const;
 
   ProbabilityBound ApplyFeatureTags(
       const absl::btree_set<hb_tag_t>& feature_tags,
       ProbabilityBound codepoints_bound) const;
 
   ProbabilityBound ApplyLowerBoundAndFeatureTags(
-    const absl::btree_set<hb_tag_t>& feature_tags,
-    double best_lower,
-    ProbabilityBound codepoints_bound) const;
+      const absl::btree_set<hb_tag_t>& feature_tags, double best_lower,
+      ProbabilityBound codepoints_bound) const;
 
   BigramSegmentCacheEntry ComputeSegmentEntry(
       const ift::encoder::SubsetDefinition& definition) const;
 
-  const BigramSegmentCacheEntry& GetOrComputeSegmentEntry(
-      absl::Span<const ift::encoder::Segment> segments,
-      ift::encoder::segment_index_t segment_index) const;
-
   UnicodeFrequencies frequencies_;
   mutable LruCache<ift::common::CodepointSet, std::optional<ProbabilityBound>>
       cache_;
-  mutable SegmentProbabilityCache<BigramSegmentCacheEntry> segment_cache_;
 };
 
 }  // namespace ift::freq

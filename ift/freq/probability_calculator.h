@@ -1,15 +1,39 @@
 #ifndef IFT_FREQ_PROBABILITY_CALCULATOR_H_
 #define IFT_FREQ_PROBABILITY_CALCULATOR_H_
 
+#include <cstdint>
+#include <memory>
+#include <utility>
 #include <vector>
 
-#include "absl/types/span.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "ift/common/int_set.h"
-#include "ift/encoder/segment.h"
+#include "ift/encoder/segment_list.h"
+#include "ift/encoder/subset_definition.h"
 #include "ift/encoder/types.h"
 #include "ift/freq/probability_bound.h"
 
 namespace ift::freq {
+
+// Computes segment and merged-segment probabilities for a specific SegmentList,
+// automatically tracking per-segment cache validity via SegmentList epochs.
+class SegmentProbabilityCalculator {
+ public:
+  virtual ~SegmentProbabilityCalculator() = default;
+
+  virtual ProbabilityBound ComputeProbability(
+      ift::encoder::segment_index_t segment_index) const = 0;
+
+  virtual ProbabilityBound ComputeMergedProbability(
+      const ift::common::SegmentSet& segment_indices) const = 0;
+
+  // Compute and return the probability bounds on a page intersecting
+  // all of the input segments.
+  virtual ProbabilityBound ComputeConjunctiveProbability(
+      const std::vector<ProbabilityBound>& bounds) const = 0;
+};
 
 class ProbabilityCalculator {
  public:
@@ -22,28 +46,33 @@ class ProbabilityCalculator {
   virtual ProbabilityBound ComputeProbability(uint32_t codepoint) const = 0;
 
   virtual ProbabilityBound ComputeProbability(
-      absl::Span<const ift::encoder::Segment> segments,
-      ift::encoder::segment_index_t segment_index) const = 0;
-
-  virtual ProbabilityBound ComputeMergedProbability(
-      absl::Span<const ift::encoder::Segment> segments,
-      const ift::common::SegmentSet& segment_indices) const = 0;
+      const ift::encoder::SubsetDefinition& definition) const = 0;
 
   // Compute and return the probability bounds on a page intersecting
   // all of the input segments.
-  //
-  // May use previously computed probability information in the segments
-  // to speed up the computation.
   virtual ProbabilityBound ComputeConjunctiveProbability(
       const std::vector<ProbabilityBound>& bounds) const = 0;
 
-  // Invalidates cached segment probabilities for the specified segments.
-  virtual void InvalidateSegmentProbabilities(
-      const ift::common::SegmentSet& segments) const {}
+  // Returns a calculator bound to `calculator` and `segments`, holding shared
+  // ownership of both.
+  static absl::StatusOr<std::unique_ptr<SegmentProbabilityCalculator>>
+  BindToSegments(std::shared_ptr<const ProbabilityCalculator> calculator,
+                 std::shared_ptr<const ift::encoder::SegmentList> segments) {
+    if (!calculator) {
+      return absl::InvalidArgumentError("calculator must not be null.");
+    }
+    if (!segments) {
+      return absl::InvalidArgumentError("segments must not be null.");
+    }
+    const ProbabilityCalculator* raw = calculator.get();
+    return raw->BindToSegmentsImpl(std::move(calculator), std::move(segments));
+  }
 
-  // Clears all cached segment probabilities and sizes the cache for
-  // num_segments.
-  virtual void ResetSegmentProbabilities(size_t num_segments) const {}
+ protected:
+  virtual absl::StatusOr<std::unique_ptr<SegmentProbabilityCalculator>>
+  BindToSegmentsImpl(
+      std::shared_ptr<const ProbabilityCalculator> self,
+      std::shared_ptr<const ift::encoder::SegmentList> segments) const = 0;
 };
 
 }  // namespace ift::freq

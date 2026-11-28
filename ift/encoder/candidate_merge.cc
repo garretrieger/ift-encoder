@@ -323,12 +323,10 @@ FindExistingCondition(
   return std::nullopt;
 }
 
-static StatusOr<double> CostFor(Merger& merger,
-                                const freq::ProbabilityCalculator* calculator,
-                                const ActivationCondition& condition,
-                                const GlyphSet& glyphs) {
-  double probability = TRY(condition.Probability(
-      merger.Context().SegmentationInfo().Segments(), *calculator));
+static StatusOr<double> CostFor(
+    Merger& merger, const freq::SegmentProbabilityCalculator* calculator,
+    const ActivationCondition& condition, const GlyphSet& glyphs) {
+  double probability = TRY(condition.Probability(*calculator));
 
   double patch_size =
       TRY(merger.Context().patch_size_cache_for_init_font->GetPatchSize(
@@ -346,7 +344,8 @@ StatusOr<std::pair<double, GlyphSet>> CandidateMerge::ComputeInitFontCostDelta(
     const GlyphSet& moved_glyphs,
     flat_hash_map<ift::common::GlyphSet, uint32_t>& smallest_size_increases,
     size_t profile_index) {
-  const auto* calculator = TRY(merger.Strategy().ProbabilityCalculator(profile_index));
+  const auto* calculator =
+      TRY(merger.SegmentProbabilityCalculator(profile_index));
 
   // Brotli compression results can be a bit noisy and it's common to see very
   // different size increase (in both directions) for adding the same glyphs as
@@ -462,8 +461,7 @@ StatusOr<std::pair<double, GlyphSet>> CandidateMerge::ComputeInitFontCostDelta(
   for (const auto& [condition, glyphs] : new_conditions) {
     // TODO(garretrieger): XXXX also include the effect of modified segments
     // in this calc. Start with finding a test case.
-    double patch_probability_after = TRY(condition.Probability(
-        merger.Context().SegmentationInfo().Segments(), *calculator));
+    double patch_probability_after = TRY(condition.Probability(*calculator));
 
     double patch_size_after =
         TRY(merger.Context().patch_size_cache_for_init_font->GetPatchSize(
@@ -486,7 +484,8 @@ StatusOr<std::pair<double, GlyphSet>> CandidateMerge::ComputeInitFontCostDelta(
 StatusOr<double> CandidateMerge::ComputeBestCaseInitFontCostDelta(
     Merger& merger, uint32_t existing_init_font_size,
     const GlyphSet& moved_glyphs, size_t profile_index) {
-  const auto* calculator = TRY(merger.Strategy().ProbabilityCalculator(profile_index));
+  const auto* calculator =
+      TRY(merger.SegmentProbabilityCalculator(profile_index));
 
   // TODO(garretrieger): consider reworking this to avoid running a glyph
   // closure, by working only with the explicitly moved glyphs.
@@ -509,8 +508,7 @@ StatusOr<double> CandidateMerge::ComputeBestCaseInitFontCostDelta(
       merger.Context(), glyph_closure_delta, SegmentSet{});
   deltas.reserve(affected_conditions.size());
   for (const auto& [condition, glyphs] : affected_conditions) {
-    double patch_probability = TRY(condition.Probability(
-        merger.Context().SegmentationInfo().Segments(), *calculator));
+    double patch_probability = TRY(condition.Probability(*calculator));
 
     GlyphSet new_glyphs = glyphs;
     new_glyphs.subtract(glyph_closure_delta);

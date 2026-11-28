@@ -137,8 +137,8 @@ static Status Analysis(hb_face_t* font,
     num_profiles += strategy.ProbabilityProfiles().size();
   }
 
-  std::vector<std::unique_ptr<BigramProbabilityCalculator>> calculator_storage;
-  std::vector<const ProbabilityCalculator*> strategy_probability_calculators;
+  std::vector<std::shared_ptr<const ProbabilityCalculator>>
+      strategy_probability_calculators;
 
   CodepointSet font_codepoints = FontHelper::ToCodepointsSet(font);
   for (auto& [_, strategy] : merge_groups) {
@@ -159,26 +159,27 @@ static Status Analysis(hb_face_t* font,
       if (absl::GetFlag(FLAGS_segmentation_analysis_split_cjk) &&
           calculator->Name() == "Script_CJK.riegeli@*") {
         std::vector<const char*> names = {
-          "Script_japanese.riegeli@*",
-          "Script_korean.riegeli@*",
-          "Script_chinese-simplified.riegeli@*",
-          "Script_chinese-traditional.riegeli@*",
+            "Script_japanese.riegeli@*",
+            "Script_korean.riegeli@*",
+            "Script_chinese-simplified.riegeli@*",
+            "Script_chinese-traditional.riegeli@*",
         };
-        for (const char* name :names) {
-          auto freq = TRY(ift::config::LoadBuiltInFrequencies(name, *resolver.get(), font_codepoints));
-          auto& calc = calculator_storage.emplace_back(std::make_unique<BigramProbabilityCalculator>(std::move(freq)));
-          strategy_probability_calculators.push_back(calc.get());
+        for (const char* name : names) {
+          auto freq = TRY(ift::config::LoadBuiltInFrequencies(
+              name, *resolver.get(), font_codepoints));
+          strategy_probability_calculators.push_back(
+              std::make_shared<BigramProbabilityCalculator>(std::move(freq)));
         }
       } else if (UnigramProbabilityCalculator* unigram =
-              dynamic_cast<UnigramProbabilityCalculator*>(calculator)) {
+                     dynamic_cast<UnigramProbabilityCalculator*>(calculator)) {
         // Depending on the configuration the encoding may have used unigram
         // probability calculations. For the purpose of analysis we want to be
         // consistent and so unigram probability calculator should be upgraded to
         // a bigram
-        calculator_storage.push_back(std::move(*unigram).ToBigramCalculator());
-        strategy_probability_calculators.push_back(calculator_storage.back().get());
+        strategy_probability_calculators.push_back(
+            std::move(*unigram).ToBigramCalculator());
       } else {
-        strategy_probability_calculators.push_back(calculator);
+        strategy_probability_calculators.push_back(profile.calculator);
       }
     }
   }

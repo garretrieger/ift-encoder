@@ -8,7 +8,6 @@
 #include "absl/status/statusor.h"
 #include "ift/common/int_set.h"
 #include "ift/config/segmentation_plan.pb.h"
-#include "ift/encoder/segment.h"
 #include "ift/encoder/subset_definition.h"
 #include "ift/encoder/types.h"
 #include "ift/freq/probability_bound.h"
@@ -214,25 +213,23 @@ class ActivationCondition {
   //            independent which means this is only an estimate as this is
   //            likely not true.
   absl::StatusOr<freq::ProbabilityBound> ProbabilityBound(
-      absl::Span<const Segment> segments,
-      const ift::freq::ProbabilityCalculator& calculator) const;
+      const ift::freq::SegmentProbabilityCalculator& calculator) const;
 
   absl::StatusOr<double> Probability(
-      absl::Span<const Segment> segments,
-      const ift::freq::ProbabilityCalculator& calculator) const;
+      const ift::freq::SegmentProbabilityCalculator& calculator) const;
 
   // Compute and return the probability that this condition will be activated if
   // it is modified to merge all segments in "merged_segments" into a single
   // segment at "merged_segment_index".
   absl::StatusOr<freq::ProbabilityBound> MergedProbabilityBound(
-      absl::Span<const Segment> segments, segment_index_t merged_segment_index,
+      segment_index_t merged_segment_index,
       const ift::common::SegmentSet& merged_segments,
-      const ift::freq::ProbabilityCalculator& calculator) const;
+      const ift::freq::SegmentProbabilityCalculator& calculator) const;
 
   absl::StatusOr<double> MergedProbability(
-      absl::Span<const Segment> segments, segment_index_t merged_segment_index,
+      segment_index_t merged_segment_index,
       const ift::common::SegmentSet& merged_segments,
-      const ift::freq::ProbabilityCalculator& calculator) const;
+      const ift::freq::SegmentProbabilityCalculator& calculator) const;
 
   ift::config::ActivationConditionProto ToConfigProto() const;
 

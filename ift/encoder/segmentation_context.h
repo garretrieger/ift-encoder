@@ -84,8 +84,8 @@ class SegmentationContext {
 
     std::unique_ptr<RequestedSegmentationInformation> segmentation_info =
         TRY(RequestedSegmentationInformation::Create(
-            SegmentationInfo().Segments(), SegmentationInfo().InitFontSegment(),
-            *closure_cache));
+            SegmentationInfo().Segments().CopySegments(),
+            SegmentationInfo().InitFontSegment(), *closure_cache));
 
     SegmentationContext context(
         original_face.get(), condition_analysis_mode_, brotli_quality_,
@@ -169,7 +169,7 @@ class SegmentationContext {
   // Caches the initial segmentation probabilities per glyph based on the
   // initial segment definitions and activation conditions.
   absl::Status CacheInitialGlyphProbabilities(
-      absl::Span<const freq::ProbabilityCalculator* const>
+      absl::Span<const std::shared_ptr<const freq::ProbabilityCalculator>>
           probability_calculators);
 
   const absl::flat_hash_map<glyph_id_t, double>& InitialGlyphProbabilities()

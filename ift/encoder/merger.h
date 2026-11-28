@@ -2,9 +2,12 @@
 #define IFT_ENCODER_MERGER_H_
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "ift/common/int_set.h"
 #include "ift/encoder/activation_condition.h"
 #include "ift/encoder/all_pairs_merger.h"
@@ -13,6 +16,8 @@
 #include "ift/encoder/merge_strategy.h"
 #include "ift/encoder/segmentation_context.h"
 #include "ift/encoder/types.h"
+#include "ift/freq/probability_calculator.h"
+#include "ift/freq/segment_probability_cache.h"
 
 namespace ift::encoder {
 
@@ -27,9 +32,13 @@ class Merger {
       SegmentationContext& context, MergeStrategy strategy,
       ift::common::SegmentSet inscope_segments,
       ift::common::SegmentSet inscope_segments_for_init_move) {
-    Merger merger(context, strategy, inscope_segments,
-                  inscope_segments_for_init_move, UINT32_MAX);
-    TRYV(merger.ResetSegmentProbabilities());
+    auto cached_agg_prob =
+        TRY(freq::SegmentProbabilityCache<CachedAggregateProbability>::Create(
+            context.SegmentationInfo().SharedSegments()));
+    Merger merger(context, std::move(strategy), std::move(inscope_segments),
+                  std::move(inscope_segments_for_init_move), UINT32_MAX,
+                  std::move(cached_agg_prob));
+    TRYV(merger.InitSegmentCalculators());
     TRYV(merger.InitOptimizationCutoff());
     return merger;
   }
@@ -144,10 +153,12 @@ class Merger {
   // cached segment probabilities when available.
   absl::StatusOr<double> AggregateProbability(
       segment_index_t segment_index) const {
-    if (cached_agg_prob_.at(segment_index) >= 0.0) {
-      return cached_agg_prob_.at(segment_index);
-    }
-    return ComputeAndCacheAggregateProbability(segment_index);
+    return cached_agg_prob_
+        .GetOrCompute(segment_index,
+                      [this, segment_index](const Segment&) {
+                        return ComputeAggregateProbability(segment_index);
+                      })
+        .value;
   }
 
   // Computes the lower-bound aggregate probability (sum of ProbabilityBound::Min
@@ -155,11 +166,12 @@ class Merger {
   // probabilities when available.
   absl::StatusOr<double> MinAggregateProbability(
       segment_index_t segment_index) const {
-    if (cached_min_agg_prob_.at(segment_index) >= 0.0) {
-      return cached_min_agg_prob_.at(segment_index);
-    }
-    TRYV(ComputeAndCacheAggregateProbability(segment_index));
-    return cached_min_agg_prob_.at(segment_index);
+    return cached_agg_prob_
+        .GetOrCompute(segment_index,
+                      [this, segment_index](const Segment&) {
+                        return ComputeAggregateProbability(segment_index);
+                      })
+        .min;
   }
 
   // Returns the cached patch size in bytes of the exclusive glyph set for
@@ -212,18 +224,35 @@ class Merger {
     return (double)strategy_.ProbabilityProfiles().size();
   }
 
+  absl::StatusOr<const freq::SegmentProbabilityCalculator*>
+  SegmentProbabilityCalculator(size_t profile_index) const {
+    if (profile_index >= segment_calculators_.size()) {
+      return absl::InvalidArgumentError("profile_index is out of bounds.");
+    }
+    return segment_calculators_[profile_index].get();
+  }
+
  private:
-  Merger(SegmentationContext& context, MergeStrategy strategy,
-         ift::common::SegmentSet inscope_segments,
-         ift::common::SegmentSet inscope_segments_for_init_move,
-         segment_index_t optimization_cutoff_segment)
+  struct CachedAggregateProbability {
+    double value = 0.0;
+    double min = 0.0;
+  };
+
+  Merger(
+      SegmentationContext& context, MergeStrategy strategy,
+      ift::common::SegmentSet inscope_segments,
+      ift::common::SegmentSet inscope_segments_for_init_move,
+      segment_index_t optimization_cutoff_segment,
+      freq::SegmentProbabilityCache<CachedAggregateProbability> cached_agg_prob)
       : context_(&context),
-        strategy_(strategy),
-        inscope_segments_(inscope_segments),
+        strategy_(std::move(strategy)),
+        inscope_segments_(std::move(inscope_segments)),
         candidate_segments_(
             ComputeCandidateSegments(*context_, strategy_, inscope_segments_)),
-        inscope_segments_for_init_move_(inscope_segments_for_init_move),
-        optimization_cutoff_segment_(optimization_cutoff_segment) {}
+        inscope_segments_for_init_move_(
+            std::move(inscope_segments_for_init_move)),
+        optimization_cutoff_segment_(optimization_cutoff_segment),
+        cached_agg_prob_(std::move(cached_agg_prob)) {}
 
   static ift::common::SegmentSet ComputeCandidateSegments(
       SegmentationContext& context, const MergeStrategy& strategy,
@@ -235,8 +264,8 @@ class Merger {
 
   absl::StatusOr<std::optional<InvalidationSet>> TryNextPatchMerge();
 
-  absl::Status ResetSegmentProbabilities() const;
-  absl::StatusOr<double> ComputeAndCacheAggregateProbability(
+  absl::Status InitSegmentCalculators();
+  CachedAggregateProbability ComputeAggregateProbability(
       segment_index_t segment_index) const;
   absl::StatusOr<uint32_t> ComputeAndCacheExclusivePatchSize(
       segment_index_t segment_index) const;
@@ -327,17 +356,23 @@ class Merger {
 
   // Stores the settings that configure how merging operations are
   // selected and performed.
-  const MergeStrategy strategy_;
+  MergeStrategy strategy_;
+
+  // Bound per-profile segment probability calculators tied to
+  // context_->SegmentationInfo().Segments(). Declared after strategy_ so these
+  // are destroyed before strategy_ releases the underlying calculators.
+  std::vector<std::unique_ptr<freq::SegmentProbabilityCalculator>>
+      segment_calculators_;
 
   // The current set of segments under consideration for being merged.
-  const ift::common::SegmentSet inscope_segments_;
+  ift::common::SegmentSet inscope_segments_;
   ift::common::SegmentSet candidate_segments_;
   std::optional<ift::common::GlyphSet> candidate_patch_merge_glyphs_;
 
   // This is the set of segments under consideration for being merged into the
   // init font. Typically contains segments that were removed from
   // inscope_segments_ for being shared with other groups.
-  const ift::common::SegmentSet inscope_segments_for_init_move_;
+  ift::common::SegmentSet inscope_segments_for_init_move_;
 
   // Segments greater than this value do not have optimization used when
   // selecting merges. Merging is done via simple selection until minimum group
@@ -347,10 +382,9 @@ class Merger {
   // Percent reduction of data beyond the single largest input patch.
   absl::btree_map<int32_t, uint32_t> merged_size_reduction_histogram_;
 
-  // Per-segment cached aggregate probability, lower-bound aggregate
-  // probability, and exclusive patch size in bytes.
-  mutable std::vector<double> cached_agg_prob_;
-  mutable std::vector<double> cached_min_agg_prob_;
+  // Per-segment cached aggregate probability and exclusive patch size in bytes.
+  mutable freq::SegmentProbabilityCache<CachedAggregateProbability>
+      cached_agg_prob_;
   mutable std::vector<uint32_t> cached_exclusive_size_;
   mutable std::optional<uint32_t> cached_base_overhead_;
   mutable const PatchSizeCache* cached_patch_size_cache_ = nullptr;

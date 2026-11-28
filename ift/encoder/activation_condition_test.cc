@@ -1,6 +1,7 @@
 #include "ift/encoder/activation_condition.h"
 
 #include <algorithm>
+#include <memory>
 #include <random>
 #include <utility>
 #include <vector>
@@ -8,9 +9,12 @@
 #include "absl/status/status.h"
 #include "gtest/gtest.h"
 #include "ift/common/int_set.h"
+#include "ift/encoder/segment.h"
+#include "ift/encoder/segment_list.h"
 #include "ift/encoder/subset_definition.h"
 #include "ift/freq/mock_probability_calculator.h"
 #include "ift/freq/probability_bound.h"
+#include "ift/freq/probability_calculator.h"
 #include "ift/proto/patch_encoding.h"
 #include "ift/proto/patch_map.h"
 
@@ -209,11 +213,11 @@ TEST(ActivationConditionTest,
 }
 
 TEST(ActivationConditionTest, ActivationConditionProbabilities) {
-  std::vector<Segment> segments = {
-      {{'a'}},
-      {{'b'}},
-      {{'c'}},
-  };
+  auto segments = SegmentList::Create({
+      Segment{{'a'}},
+      Segment{{'b'}},
+      Segment{{'c'}},
+  });
   std::vector<std::pair<Segment, double>> segment_probabilities = {
       {{{'a'}}, 0.75},
       {{{'b'}}, 0.5},
@@ -225,35 +229,38 @@ TEST(ActivationConditionTest, ActivationConditionProbabilities) {
       // 1 OR 2
       {{{'b', 'c'}}, 0.66},
   };
-  MockProbabilityCalculator probability_calculator(segment_probabilities);
+  auto probability_calculator =
+      std::make_shared<MockProbabilityCalculator>(segment_probabilities);
+  auto bound_calculator = *freq::ProbabilityCalculator::BindToSegments(
+      probability_calculator, segments);
 
   ASSERT_EQ(*ActivationCondition::exclusive_segment(0, 1).Probability(
-                segments, probability_calculator),
+                *bound_calculator),
             0.75);
   ASSERT_EQ(*ActivationCondition::exclusive_segment(2, 1).Probability(
-                segments, probability_calculator),
+                *bound_calculator),
             0.25);
 
   ASSERT_EQ(*ActivationCondition::and_segments({0, 1}, 1).Probability(
-                segments, probability_calculator),
+                *bound_calculator),
             0.75 * 0.5);
   ASSERT_EQ(*ActivationCondition::and_segments({0, 2}, 1).Probability(
-                segments, probability_calculator),
+                *bound_calculator),
             0.75 * 0.25);
   ASSERT_EQ(*ActivationCondition::and_segments({0, 1, 2}, 1)
-                 .Probability(segments, probability_calculator),
+                 .Probability(*bound_calculator),
             0.75 * 0.5 * 0.25);
 
   ASSERT_EQ(*ActivationCondition::or_segments({1, 2}, 1).Probability(
-                segments, probability_calculator),
+                *bound_calculator),
             0.66);
 
   ASSERT_EQ(*ActivationCondition::or_segments({0, 1}, 1).Probability(
-                segments, probability_calculator),
+                *bound_calculator),
             0.77);
 
   ASSERT_EQ(*ActivationCondition::composite_condition({{1, 2}, {0, 1}}, 1)
-                 .Probability(segments, probability_calculator),
+                 .Probability(*bound_calculator),
             // {1, 2} 0.66 * {0, 1} 0.77
             0.66 * 0.77);
 }
@@ -261,42 +268,45 @@ TEST(ActivationConditionTest, ActivationConditionProbabilities) {
 TEST(ActivationConditionTest, Probability_RejectsEmptySegmentSet) {
   ActivationCondition invalid_condition =
       ActivationCondition::composite_condition({{}, {1}}, 10);
-  MockProbabilityCalculator probability_calculator({});
-  std::vector<Segment> segments = {
-      {{'a'}},
-      {{'b'}},
-  };
+  auto probability_calculator = std::make_shared<MockProbabilityCalculator>(
+      std::vector<std::pair<Segment, double>>{});
+  auto segments = SegmentList::Create({
+      Segment{{'a'}},
+      Segment{{'b'}},
+  });
+  auto bound_calculator = *freq::ProbabilityCalculator::BindToSegments(
+      probability_calculator, segments);
 
-  EXPECT_FALSE(
-      invalid_condition.Probability(segments, probability_calculator).ok());
+  EXPECT_FALSE(invalid_condition.Probability(*bound_calculator).ok());
 
   SegmentSet merged_segments{0};
-  EXPECT_FALSE(invalid_condition
-                   .MergedProbability(segments, {}, merged_segments,
-                                      probability_calculator)
-                   .ok());
+  EXPECT_FALSE(
+      invalid_condition.MergedProbability(0, merged_segments, *bound_calculator)
+          .ok());
 }
 
 TEST(ActivationConditionTest, Probability_EmptyCondition) {
   ActivationCondition empty_condition = ActivationCondition::True(10);
-  MockProbabilityCalculator probability_calculator({});
-  std::vector<Segment> segments;
+  auto probability_calculator = std::make_shared<MockProbabilityCalculator>(
+      std::vector<std::pair<Segment, double>>{});
+  auto segments = SegmentList::Create();
+  auto bound_calculator = *freq::ProbabilityCalculator::BindToSegments(
+      probability_calculator, segments);
 
-  EXPECT_EQ(*empty_condition.Probability(segments, probability_calculator),
-            1.0);
+  EXPECT_EQ(*empty_condition.Probability(*bound_calculator), 1.0);
 
   SegmentSet merged_segments{0};
-  EXPECT_EQ(*empty_condition.MergedProbability(segments, {}, merged_segments,
-                                               probability_calculator),
-            1.0);
+  EXPECT_EQ(
+      *empty_condition.MergedProbability(0, merged_segments, *bound_calculator),
+      1.0);
 }
 
 TEST(ActivationConditionTest, MergedProbability) {
-  std::vector<Segment> segments = {
-      /* 0 */ {{'a'}},
-      /* 1 */ {{'b'}},
-      /* 2 */ {{'c'}},
-  };
+  auto segments = SegmentList::Create({
+      /* 0 */ Segment{{'a'}},
+      /* 1 */ Segment{{'b'}},
+      /* 2 */ Segment{{'c'}},
+  });
 
   double Pa = 0.75;
   double Pb = 0.50;
@@ -319,83 +329,83 @@ TEST(ActivationConditionTest, MergedProbability) {
       {{{'a', 'b', 'c'}}, Pabc},
 
   };
-  MockProbabilityCalculator probability_calculator(segment_probabilities);
+  auto probability_calculator =
+      std::make_shared<MockProbabilityCalculator>(segment_probabilities);
+  auto bound_calculator = *freq::ProbabilityCalculator::BindToSegments(
+      probability_calculator, segments);
 
   SegmentSet merged_segments{0, 1};
 
   // Ignores segments that are not present in the condition.
   EXPECT_NEAR(*ActivationCondition::exclusive_segment(0, 1).MergedProbability(
-                  segments, 5, merged_segments, probability_calculator),
+                  5, merged_segments, *bound_calculator),
               Pa, 1e-9);
   EXPECT_NEAR(*ActivationCondition::or_segments({0, 2}, 1).MergedProbability(
-                  segments, 5, merged_segments, probability_calculator),
+                  5, merged_segments, *bound_calculator),
               Pac, 1e-9);
   EXPECT_NEAR(*ActivationCondition::and_segments({0, 2}, 1).MergedProbability(
-                  segments, 5, merged_segments, probability_calculator),
+                  5, merged_segments, *bound_calculator),
               Pa * Pc, 1e-9);
 
   // Conjunctive with merge intersection
   // {0} get's replaced with {0 U 1}
   EXPECT_NEAR(*ActivationCondition::and_segments({0, 2}, 1)
-              // compute P((a OR b) AND c)
-              .ReplaceSegments(0, {0, 1})
-              .MergedProbability(segments, 0, merged_segments,
-                                 probability_calculator),
+                   // compute P((a OR b) AND c)
+                   .ReplaceSegments(0, {0, 1})
+                   .MergedProbability(0, merged_segments, *bound_calculator),
               Pab * Pc, 1e-9);
 
   // Disjunctive with merge intersection
   // {0} get's replaced with {0 U 1}
   EXPECT_NEAR(*ActivationCondition::or_segments({0}, 1)
                    .ReplaceSegments(0, {0, 1})
-                   .MergedProbability(segments, 0, merged_segments,
-                                      probability_calculator),
+                   .MergedProbability(0, merged_segments, *bound_calculator),
               Pab, 1e-9);
   EXPECT_NEAR(*ActivationCondition::or_segments({1}, 1)
                    .ReplaceSegments(0, {0, 1})
-                   .MergedProbability(segments, 0, merged_segments,
-                                      probability_calculator),
+                   .MergedProbability(0, merged_segments, *bound_calculator),
               Pab, 1e-9);
   EXPECT_NEAR(*ActivationCondition::or_segments({0, 1}, 1)
                    .ReplaceSegments(0, {0, 1})
-                   .MergedProbability(segments, 0, merged_segments,
-                                      probability_calculator),
+                   .MergedProbability(0, merged_segments, *bound_calculator),
               Pab, 1e-9);
 
   // Disjunctive with partial merge intersection
   EXPECT_NEAR(*ActivationCondition::or_segments({0, 2}, 1)
                    .ReplaceSegments(0, {0, 1})
-                   .MergedProbability(segments, 0, merged_segments,
-                                      probability_calculator),
+                   .MergedProbability(0, merged_segments, *bound_calculator),
               0.95, 1e-9);
 
   // Conjunctive with partial merge intersection
   EXPECT_NEAR(*ActivationCondition::and_segments({0, 1, 2}, 1)
-                   .ReplaceSegments(2, {1, 2}) // -> a AND c
+                   .ReplaceSegments(2, {1, 2})  // -> a AND c
                    // compute a AND (a OR b)
-                   .MergedProbability(segments, 2, merged_segments,
-                                      probability_calculator),
+                   .MergedProbability(2, merged_segments, *bound_calculator),
               Pa * Pab, 1e-9);
 
   // Composite condition
   // (0 or 1) AND 2 =merge {1, 2}=> (0 or 1)
   EXPECT_NEAR(*ActivationCondition::composite_condition({{0, 1}, {2}}, 1)
                    .ReplaceSegments(1, {1, 2})
-                   .MergedProbability(segments, 1, merged_segments,
-                                      probability_calculator),
+                   .MergedProbability(1, merged_segments, *bound_calculator),
               Pab, 1e-9);
 }
 
 TEST(ActivationConditionTest, True) {
   ActivationCondition true_condition = ActivationCondition::True(10);
   ActivationCondition condition = ActivationCondition::and_segments({1}, 10);
-  MockProbabilityCalculator probability_calculator({});
+  auto probability_calculator = std::make_shared<MockProbabilityCalculator>(
+      std::vector<std::pair<Segment, double>>{});
+  auto empty_segments = SegmentList::Create();
+  auto bound_calculator = *freq::ProbabilityCalculator::BindToSegments(
+      probability_calculator, empty_segments);
 
   ASSERT_EQ(true_condition.ToString(), "if (true) then p10");
   ASSERT_TRUE(true_condition.IsAlwaysTrue());
   ASSERT_FALSE(condition.IsAlwaysTrue());
   ASSERT_FALSE(true_condition.IsPurelyConjunctive());
   ASSERT_FALSE(true_condition.IsPurelyDisjunctive());
-  ASSERT_EQ(*true_condition.Probability({}, probability_calculator), 1.0);
+  ASSERT_EQ(*true_condition.Probability(*bound_calculator), 1.0);
 }
 
 TEST(ActivationConditionTest, AndOr_True) {

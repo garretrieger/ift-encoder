@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -36,21 +37,22 @@ using ift::common::SegmentSet;
 namespace ift::encoder {
 
 Status SegmentationContext::CacheInitialGlyphProbabilities(
-    absl::Span<const freq::ProbabilityCalculator* const>
+    absl::Span<const std::shared_ptr<const freq::ProbabilityCalculator>>
         probability_calculators) {
   initial_glyph_probabilities_.clear();
-  for (const freq::ProbabilityCalculator* calculator :
-       probability_calculators) {
-    calculator->ResetSegmentProbabilities(
-        segmentation_info_->Segments().size());
+  std::vector<std::unique_ptr<freq::SegmentProbabilityCalculator>>
+      bound_calculators;
+  bound_calculators.reserve(probability_calculators.size());
+  auto segments = segmentation_info_->SharedSegments();
+  for (const auto& calculator : probability_calculators) {
+    bound_calculators.push_back(
+        TRY(freq::ProbabilityCalculator::BindToSegments(calculator, segments)));
   }
 
   for (const auto& [cond, gids] : glyph_groupings.ConditionsAndGlyphs()) {
     double max_prob = 0.0;
-    for (const freq::ProbabilityCalculator* calculator :
-         probability_calculators) {
-      double prob =
-          TRY(cond.Probability(segmentation_info_->Segments(), *calculator));
+    for (const auto& calculator : bound_calculators) {
+      double prob = TRY(cond.Probability(*calculator));
       if (prob > max_prob) {
         max_prob = prob;
       }

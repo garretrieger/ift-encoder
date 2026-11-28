@@ -65,12 +65,13 @@ class MergeStrategy {
     std::optional<double> init_font_merge_threshold = std::nullopt;
     std::optional<double> init_font_merge_probability_threshold = std::nullopt;
 
-    absl::StatusOr<const freq::ProbabilityCalculator*> Calculator() const {
+    absl::StatusOr<std::shared_ptr<const freq::ProbabilityCalculator>>
+    Calculator() const {
       if (!calculator) {
         return absl::InvalidArgumentError(
             "Probability profile is missing a probability calculator.");
       }
-      return calculator.get();
+      return calculator;
     }
 
     bool operator==(const ProbabilityProfile& other) const {
@@ -168,15 +169,8 @@ class MergeStrategy {
   uint32_t PatchSizeMinBytes() const { return patch_size_min_bytes_; }
   uint32_t PatchSizeMaxBytes() const { return patch_size_max_bytes_; }
 
-  absl::Status ResetSegmentProbabilities(size_t num_segments) const {
-    for (const auto& profile : ProbabilityProfiles()) {
-      TRY(profile.Calculator())->ResetSegmentProbabilities(num_segments);
-    }
-    return absl::OkStatus();
-  }
-
-  absl::StatusOr<const freq::ProbabilityCalculator*> ProbabilityCalculator(
-      size_t profile_index) const {
+  absl::StatusOr<std::shared_ptr<const freq::ProbabilityCalculator>>
+  ProbabilityCalculator(size_t profile_index) const {
     if (profile_index >= probability_profiles_.size()) {
       return absl::InvalidArgumentError("profile_index is out of bounds.");
     }
@@ -185,7 +179,7 @@ class MergeStrategy {
       return absl::InvalidArgumentError(
           "Probability profile is missing calculator.");
     }
-    return profile.calculator.get();
+    return profile.calculator;
   }
 
   void SetMinimumGroupSize(uint32_t value) { min_group_size_ = value; }

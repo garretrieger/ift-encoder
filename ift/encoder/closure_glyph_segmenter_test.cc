@@ -1037,7 +1037,8 @@ TEST_F(ClosureGlyphSegmenterTest, TotalCost) {
       {{' ', ' '}, 100}, {{'a', 'a'}, 95}, {{'b', 'b'}, 1},
       {{'c', 'c'}, 1},   {{'d', 'd'}, 50}, {{'e', 'e'}, 25},
   };
-  UnigramProbabilityCalculator calculator(std::move(frequencies));
+  auto calculator =
+      std::make_shared<UnigramProbabilityCalculator>(std::move(frequencies));
 
   // Basic no segment case.
   GlyphSegmentation segmentation1({'a', 'b', 'c'}, {});
@@ -1046,7 +1047,7 @@ TEST_F(ClosureGlyphSegmenterTest, TotalCost) {
 
   ClosureGlyphSegmenter segmenter(8, 8, DEP_GRAPH_ONLY, resolver);
   std::vector<SegmentationCost> base_cost =
-      *segmenter.TotalCosts(roboto.get(), segmentation1, {&calculator});
+      *segmenter.TotalCosts(roboto.get(), segmentation1, {calculator});
   ASSERT_GT(base_cost[0].ift_init_cost, 1000);
   ASSERT_EQ(base_cost[0].ift_init_cost, base_cost[0].non_ift_total_cost);
   ASSERT_EQ(base_cost[0].ift_init_cost, base_cost[0].ideal_init_cost);
@@ -1069,7 +1070,7 @@ TEST_F(ClosureGlyphSegmenterTest, TotalCost) {
   segmentation2.CopySegments(segments);
 
   std::vector<SegmentationCost> with_patches_cost =
-      *segmenter.TotalCosts(roboto.get(), segmentation2, {&calculator});
+      *segmenter.TotalCosts(roboto.get(), segmentation2, {calculator});
   ASSERT_GT(with_patches_cost[0].ift_patch_cost, base_cost[0].ift_patch_cost);
   ASSERT_LT(with_patches_cost[0].ideal_patch_cost,
             with_patches_cost[0].ift_patch_cost);
@@ -1101,7 +1102,7 @@ TEST_F(ClosureGlyphSegmenterTest, TotalCost) {
       (double)*patch_sizer.GetPatchSize({106, 107}) + kDefaultNetworkCost;
 
   std::vector<SegmentationCost> with_uncovered_cost =
-      *segmenter.TotalCosts(roboto.get(), segmentation3, {&calculator});
+      *segmenter.TotalCosts(roboto.get(), segmentation3, {calculator});
   ASSERT_EQ(with_uncovered_cost[0].uncovered_ift_patch_cost,
             expected_uncovered_cost);
 }
@@ -1120,9 +1121,10 @@ TEST_F(ClosureGlyphSegmenterTest, TotalCost_MixedModeUsesCutMixedModeInitSubset)
       {{'b', 'b'}, 50},
       {{'c', 'c'}, 25},
   };
-  UnigramProbabilityCalculator calculator(std::move(frequencies));
+  auto calculator =
+      std::make_shared<UnigramProbabilityCalculator>(std::move(frequencies));
 
-  auto costs = segmenter.TotalCosts(vf_face.get(), *segmentation, {&calculator});
+  auto costs = segmenter.TotalCosts(vf_face.get(), *segmentation, {calculator});
   ASSERT_TRUE(costs.ok()) << costs.status();
 
   auto expected_init = Compiler::CutMixedModeInitSubset(
@@ -2963,7 +2965,7 @@ TEST_F(ClosureGlyphSegmenterTest,
       ift::config::UNICODE_RANGE);
   ASSERT_TRUE(context.ok()) << context.status();
 
-  ASSERT_TRUE(context->CacheInitialGlyphProbabilities({calc.get()}).ok());
+  ASSERT_TRUE(context->CacheInitialGlyphProbabilities({calc}).ok());
   const auto& initial_probs = context->InitialGlyphProbabilities();
 
   // Glyph 74 is 'f' (P = 0.8), glyph 77 is 'i' (P = 0.7).
@@ -3222,7 +3224,8 @@ TEST_F(ClosureGlyphSegmenterTest, UnicodeRange_TotalCosts) {
   UnicodeFrequencies frequencies{
       {{' ', ' '}, 100}, {{'a', 'a'}, 95}, {{'b', 'b'}, 50}, {{'c', 'c'}, 25},
   };
-  UnigramProbabilityCalculator calculator(std::move(frequencies));
+  auto calculator =
+      std::make_shared<UnigramProbabilityCalculator>(std::move(frequencies));
 
   GlyphSegmentation segmentation({'a'}, {});
   auto sc = GlyphSegmentation::ConditionsToSegmentation(
@@ -3237,12 +3240,12 @@ TEST_F(ClosureGlyphSegmenterTest, UnicodeRange_TotalCosts) {
   ClosureGlyphSegmenter ift_seg(8, 8, DEP_GRAPH_ONLY, resolver,
                                 ift::config::IFT);
   std::vector<SegmentationCost> ift_costs =
-      *ift_seg.TotalCosts(roboto.get(), segmentation, {&calculator});
+      *ift_seg.TotalCosts(roboto.get(), segmentation, {calculator});
 
   ClosureGlyphSegmenter ur_seg(8, 8, DEP_GRAPH_ONLY, resolver,
                                ift::config::UNICODE_RANGE);
   std::vector<SegmentationCost> ur_costs =
-      *ur_seg.TotalCosts(roboto.get(), segmentation, {&calculator});
+      *ur_seg.TotalCosts(roboto.get(), segmentation, {calculator});
 
   EXPECT_EQ(ur_costs[0].ift_init_cost, 0.0);
   EXPECT_EQ(ur_costs[0].ideal_init_cost, 0.0);
@@ -3253,8 +3256,8 @@ TEST_F(ClosureGlyphSegmenterTest, UnicodeRange_TotalCosts) {
   Woff2PatchSizeCache woff2_sizer(roboto.get(), base_subset, 11);
   double size_0 = (double)*woff2_sizer.GetPatchSize({70});
   double size_1 = (double)*woff2_sizer.GetPatchSize({71});
-  double p_b = calculator.ComputeProbability('b').Value();
-  double p_c = calculator.ComputeProbability('c').Value();
+  double p_b = calculator->ComputeProbability('b').Value();
+  double p_c = calculator->ComputeProbability('c').Value();
   double expected_patch_cost = p_b * (size_0 + kDefaultNetworkCost) +
                                p_c * (size_1 + kDefaultNetworkCost);
   EXPECT_NEAR(ur_costs[0].ift_patch_cost, expected_patch_cost, 1e-6);
@@ -3306,9 +3309,9 @@ TEST_F(ClosureGlyphSegmenterTest, AllPairsMerging_AvoidsGreedyTrap_EndToEnd) {
   GlyphSegmentation all_pairs_seg = *all_pairs_res;
 
   auto single_base_costs =
-      *segmenter.TotalCosts(roboto.get(), single_base_seg, {calc.get()});
+      *segmenter.TotalCosts(roboto.get(), single_base_seg, {calc});
   auto all_pairs_costs =
-      *segmenter.TotalCosts(roboto.get(), all_pairs_seg, {calc.get()});
+      *segmenter.TotalCosts(roboto.get(), all_pairs_seg, {calc});
   EXPECT_LT(all_pairs_costs[0].ift_patch_cost,
             single_base_costs[0].ift_patch_cost);
 }

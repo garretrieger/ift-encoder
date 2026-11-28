@@ -76,7 +76,7 @@ class ClosureGlyphSegmenter {
    */
   absl::StatusOr<std::vector<SegmentationCost>> TotalCosts(
       hb_face_t* original_face, const GlyphSegmentation& segmentation,
-      absl::Span<const freq::ProbabilityCalculator* const>
+      absl::Span<const std::shared_ptr<const freq::ProbabilityCalculator>>
           probability_calculators) const;
 
   static absl::Status AddTableKeyedSegments(

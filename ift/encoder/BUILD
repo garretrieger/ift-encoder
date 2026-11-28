@@ -205,6 +205,7 @@ cc_library(
     ],
     hdrs = [
         "segment.h",
+        "segment_list.h",
         "subset_definition.h",
         "types.h",
     ],
@@ -220,6 +221,7 @@ cc_library(
         "@abseil-cpp//absl/container:btree",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
         "@harfbuzz",
     ],
 )
@@ -328,6 +330,20 @@ cc_test(
         "//ift/common:data_file_resolver",
         "//ift/common:test_font_loader",
         "//ift/freq:common",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "segment_list_test",
+    size = "small",
+    srcs = [
+        "segment_list_test.cc",
+    ],
+    deps = [
+        ":common",
+        "//ift/common",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -489,6 +505,7 @@ cc_test(
         ":common",
         ":encoder",
         "//ift/common",
+        "//ift/freq",
         "//ift/freq:common",
         "//ift/freq:mock_probability_calculator",
         "//ift/proto",

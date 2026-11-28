@@ -33,7 +33,7 @@ using absl::StrCat;
 using ift::common::IntSet;
 using ift::common::SegmentSet;
 using ift::freq::ProbabilityBound;
-using ift::freq::ProbabilityCalculator;
+using ift::freq::SegmentProbabilityCalculator;
 using ift::proto::GLYPH_KEYED;
 using ift::proto::PatchEncoding;
 using ift::proto::PatchMap;
@@ -1043,14 +1043,12 @@ ActivationCondition::ActivationConditionsToPatchMapEntries(
 }
 
 StatusOr<double> ActivationCondition::Probability(
-    Span<const Segment> segments,
-    const ProbabilityCalculator& calculator) const {
-  return TRY(this->ProbabilityBound(segments, calculator)).Value();
+    const SegmentProbabilityCalculator& calculator) const {
+  return TRY(this->ProbabilityBound(calculator)).Value();
 }
 
 StatusOr<ProbabilityBound> ActivationCondition::ProbabilityBound(
-    Span<const Segment> segments,
-    const ProbabilityCalculator& calculator) const {
+    const SegmentProbabilityCalculator& calculator) const {
   if (conditions_.empty()) {
     return freq::ProbabilityBound(1.0, 1.0);
   }
@@ -1063,10 +1061,10 @@ StatusOr<ProbabilityBound> ActivationCondition::ProbabilityBound(
     if (size == 0) {
       return absl::InternalError("Unexpected empty disjunctive group.");
     } else if (size > 1) {
-      set_bound = calculator.ComputeMergedProbability(segments, segment_set);
+      set_bound = calculator.ComputeMergedProbability(segment_set);
     } else {
       segment_index_t s = *segment_set.min();
-      set_bound = calculator.ComputeProbability(segments, s);
+      set_bound = calculator.ComputeProbability(s);
     }
 
     if (!is_conjunctive) {
@@ -1079,18 +1077,16 @@ StatusOr<ProbabilityBound> ActivationCondition::ProbabilityBound(
 }
 
 StatusOr<double> ActivationCondition::MergedProbability(
-    Span<const Segment> segments, segment_index_t merged_segment_index,
-    const SegmentSet& merged_segments,
-    const ProbabilityCalculator& calculator) const {
-  return TRY(MergedProbabilityBound(segments, merged_segment_index,
-                                    merged_segments, calculator))
+    segment_index_t merged_segment_index, const SegmentSet& merged_segments,
+    const SegmentProbabilityCalculator& calculator) const {
+  return TRY(MergedProbabilityBound(merged_segment_index, merged_segments,
+                                    calculator))
       .Value();
 }
 
 StatusOr<ProbabilityBound> ActivationCondition::MergedProbabilityBound(
-    Span<const Segment> segments, segment_index_t merged_segment_index,
-    const SegmentSet& merged_segments,
-    const ProbabilityCalculator& calculator) const {
+    segment_index_t merged_segment_index, const SegmentSet& merged_segments,
+    const SegmentProbabilityCalculator& calculator) const {
   if (conditions_.empty()) {
     return freq::ProbabilityBound(1.0, 1.0);
   }
@@ -1106,17 +1102,16 @@ StatusOr<ProbabilityBound> ActivationCondition::MergedProbabilityBound(
       if (segment_set.contains(merged_segment_index)) {
         SegmentSet effective = segment_set;
         effective.union_set(merged_segments);
-        set_bound = calculator.ComputeMergedProbability(segments, effective);
+        set_bound = calculator.ComputeMergedProbability(effective);
       } else {
-        set_bound = calculator.ComputeMergedProbability(segments, segment_set);
+        set_bound = calculator.ComputeMergedProbability(segment_set);
       }
     } else {
       segment_index_t s = *segment_set.min();
       if (s == merged_segment_index) {
-        set_bound =
-            calculator.ComputeMergedProbability(segments, merged_segments);
+        set_bound = calculator.ComputeMergedProbability(merged_segments);
       } else {
-        set_bound = calculator.ComputeProbability(segments, s);
+        set_bound = calculator.ComputeProbability(s);
       }
     }
 

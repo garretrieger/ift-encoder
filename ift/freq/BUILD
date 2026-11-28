@@ -32,12 +32,15 @@ cc_library(
     deps = [
         ":common",
         "//ift/common",
+        "//ift/common:try",
         "//ift/encoder:common",
         "@abseil-cpp//absl/container:btree",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:inlined_vector",
         "@abseil-cpp//absl/hash",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@harfbuzz",
@@ -61,7 +64,9 @@ cc_test(
     deps = [
         ":common",
         ":freq",
+        "//ift/common",
         "//ift/encoder:common",
+        "@abseil-cpp//absl/status",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -73,8 +78,9 @@ cc_test(
     deps = [
         ":common",
         ":freq",
-        "//ift/encoder:common",
         "//ift/common",
+        "//ift/encoder:common",
+        "@abseil-cpp//absl/status",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -89,6 +95,8 @@ cc_library(
     deps = [
         ":freq",
         "//ift/encoder:common",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
@@ -109,6 +117,8 @@ cc_test(
         ":common",
         ":freq",
         "//ift/common",
+        "//ift/encoder:common",
+        "@abseil-cpp//absl/status",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],

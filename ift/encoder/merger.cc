@@ -31,20 +31,16 @@ bool Merger::ShouldRecordMergedSizeReductions() const {
   return absl::GetFlag(FLAGS_record_merged_size_reductions);
 }
 
-StatusOr<double> Merger::ComputeAndCacheAggregateProbability(
+Merger::CachedAggregateProbability Merger::ComputeAggregateProbability(
     segment_index_t segment_index) const {
   double total = 0.0;
   double min_total = 0.0;
-  const auto& segments = Context().SegmentationInfo().Segments();
-  for (const auto& profile : strategy_.ProbabilityProfiles()) {
-    auto bound =
-        TRY(profile.Calculator())->ComputeProbability(segments, segment_index);
+  for (const auto& calculator : segment_calculators_) {
+    auto bound = calculator->ComputeProbability(segment_index);
     total += bound.Value();
     min_total += bound.Min();
   }
-  cached_agg_prob_.at(segment_index) = total;
-  cached_min_agg_prob_.at(segment_index) = min_total;
-  return total;
+  return CachedAggregateProbability{.value = total, .min = min_total};
 }
 
 void Merger::EnsurePatchSizeCacheValid() const {
@@ -86,36 +82,29 @@ StatusOr<uint32_t> Merger::ComputeAndCacheBasePatchOverhead() const {
 
 StatusOr<double> Merger::AggregateProbability(
     const ActivationCondition& condition) const {
-  const auto& segments = Context().SegmentationInfo().Segments();
   double total = 0.0;
-  for (const auto& profile : strategy_.ProbabilityProfiles()) {
-    total += TRY(condition.Probability(segments, *TRY(profile.Calculator())));
+  for (const auto& calculator : segment_calculators_) {
+    total += TRY(condition.Probability(*calculator));
   }
   return total;
 }
 
 StatusOr<double> Merger::AggregateMergedProbability(
     const SegmentSet& merged_segments) const {
-  const auto& segments = Context().SegmentationInfo().Segments();
   double total = 0.0;
-  for (const auto& profile : strategy_.ProbabilityProfiles()) {
-    total += TRY(profile.Calculator())
-                 ->ComputeMergedProbability(segments, merged_segments)
-                 .Value();
+  for (const auto& calculator : segment_calculators_) {
+    total += calculator->ComputeMergedProbability(merged_segments).Value();
   }
   return total;
 }
 
 StatusOr<double> Merger::AggregateMergedProbability(
-    const ActivationCondition& condition,
-    segment_index_t merged_segment_index,
+    const ActivationCondition& condition, segment_index_t merged_segment_index,
     const SegmentSet& merged_segments) const {
-  const auto& segments = Context().SegmentationInfo().Segments();
   double total = 0.0;
-  for (const auto& profile : strategy_.ProbabilityProfiles()) {
-    total += TRY(condition.MergedProbability(segments, merged_segment_index,
-                                             merged_segments,
-                                             *TRY(profile.Calculator())));
+  for (const auto& calculator : segment_calculators_) {
+    total += TRY(condition.MergedProbability(merged_segment_index,
+                                             merged_segments, *calculator));
   }
   return total;
 }
@@ -242,20 +231,19 @@ SegmentSet Merger::InitFontSegmentsToCheck(const SegmentSet& inscope) const {
 StatusOr<SegmentSet> Merger::InitFontApplyProbabilityThreshold(
     size_t profile_index) const {
   const auto* profile = TRY(strategy_.GetProbabilityProfile(profile_index));
-  const auto* calculator = TRY(strategy_.ProbabilityCalculator(profile_index));
+  const auto* calculator = TRY(SegmentProbabilityCalculator(profile_index));
   const auto& segments = Context().SegmentationInfo().Segments();
 
   SegmentSet inscope;
   uint32_t skipped = 0;
   if (profile->init_font_merge_probability_threshold.has_value()) {
     for (segment_index_t s : inscope_segments_for_init_move_) {
-
       const auto& seg = segments.at(s);
       if (seg.Definition().Empty()) {
         continue;
       }
 
-      auto p = calculator->ComputeProbability(segments, s).Value();
+      auto p = calculator->ComputeProbability(s).Value();
       if (p >= *profile->init_font_merge_probability_threshold) {
         inscope.insert(s);
       } else {
@@ -399,22 +387,23 @@ Status Merger::MoveSegmentsToInitFont(size_t profile_index) {
   return absl::OkStatus();
 }
 
-Status Merger::ResetSegmentProbabilities() const {
-  size_t num_segments = Context().SegmentationInfo().Segments().size();
-  cached_agg_prob_.assign(num_segments, -1.0);
-  cached_min_agg_prob_.assign(num_segments, -1.0);
-  cached_exclusive_size_.assign(num_segments, UINT32_MAX);
-  cached_base_overhead_ = std::nullopt;
-  cached_patch_size_cache_ = context_->patch_size_cache.get();
-  exclusive_sizes_dirty_ = false;
-  return strategy_.ResetSegmentProbabilities(num_segments);
+Status Merger::InitSegmentCalculators() {
+  segment_calculators_.clear();
+  segment_calculators_.reserve(strategy_.ProbabilityProfiles().size());
+  auto segments = Context().SegmentationInfo().SharedSegments();
+  for (const auto& profile : strategy_.ProbabilityProfiles()) {
+    segment_calculators_.push_back(
+        TRY(freq::ProbabilityCalculator::BindToSegments(
+            TRY(profile.Calculator()), segments)));
+  }
+  return absl::OkStatus();
 }
 
 Status Merger::ReassignInitSubset() {
   candidate_segments_ =
       ComputeCandidateSegments(Context(), strategy_, inscope_segments_);
   candidate_patch_merge_glyphs_ = std::nullopt;
-  TRYV(ResetSegmentProbabilities());
+  InvalidateExclusivePatchSizes();
   TRYV(InitOptimizationCutoff());
   all_pairs_merger_ = AllPairsMerger();
   return absl::OkStatus();
@@ -424,21 +413,13 @@ uint32_t Merger::AssignMergedSegment(segment_index_t base,
                                      const SegmentSet& to_merge,
                                      const Segment& merged_segment,
                                      bool is_inert) {
-  SegmentSet invalidated = to_merge;
-  invalidated.insert(base);
-  for (const auto& profile : strategy_.ProbabilityProfiles()) {
-    auto calc = profile.Calculator();
-    if (calc.ok()) {
-      (*calc)->InvalidateSegmentProbabilities(invalidated);
-    }
-  }
-  for (segment_index_t s : invalidated) {
-    cached_agg_prob_.at(s) = -1.0;
-    cached_min_agg_prob_.at(s) = -1.0;
-    cached_exclusive_size_.at(s) = UINT32_MAX;
-  }
   if (!is_inert) {
     exclusive_sizes_dirty_ = true;
+  } else if (!exclusive_sizes_dirty_) {
+    cached_exclusive_size_.at(base) = UINT32_MAX;
+    for (segment_index_t s : to_merge) {
+      cached_exclusive_size_.at(s) = UINT32_MAX;
+    }
   }
   all_pairs_merger_.AssignMergedSegment(*this, base, to_merge);
   candidate_segments_.subtract(to_merge);

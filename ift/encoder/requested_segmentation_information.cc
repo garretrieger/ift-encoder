@@ -11,6 +11,7 @@
 #include "ift/common/try.h"
 #include "ift/encoder/glyph_closure_cache.h"
 #include "ift/encoder/segment.h"
+#include "ift/encoder/segment_list.h"
 #include "ift/encoder/subset_definition.h"
 
 using absl::Status;
@@ -23,7 +24,7 @@ using ift::common::SegmentSet;
 namespace ift::encoder {
 
 static bool CheckSegmentsAreDisjoint(const SubsetDefinition& init_segment,
-                                     const std::vector<Segment>& segments) {
+                                     const SegmentList& segments) {
   bool segments_disjoint = true;
   SubsetDefinition full_definition = init_segment;
   for (const auto& s : segments) {
@@ -51,33 +52,35 @@ RequestedSegmentationInformation::Create(std::vector<Segment> segments,
       new RequestedSegmentationInformation(segments, init_font_segment));
   TRYV(info->ReassignInitSubset(closure_cache, init_font_segment));
   info->segments_disjoint_ =
-      CheckSegmentsAreDisjoint(init_font_segment, info->segments_);
+      CheckSegmentsAreDisjoint(init_font_segment, *info->segments_);
   return info;
 }
 
 RequestedSegmentationInformation::RequestedSegmentationInformation(
     std::vector<Segment> segments, SubsetDefinition init_font_segment)
-    : segments_(std::move(segments)), init_font_segment_() {
+    : segments_(SegmentList::Create(std::move(segments))),
+      init_font_segment_() {
   // ReassignInitSubset expects full_definition_ is already populated.
   full_definition_ = init_font_segment;
-  for (size_t i = 0; i < segments_.size(); ++i) {
-    full_definition_.Union(segments_[i].Definition());
-    AddToIndex(i, segments_[i].Definition().codepoints);
+  for (size_t i = 0; i < segments_->size(); ++i) {
+    full_definition_.Union((*segments_)[i].Definition());
+    AddToIndex(i, (*segments_)[i].Definition().codepoints);
   }
 }
 
 void RequestedSegmentationInformation::ResetSegments(
     std::vector<Segment> segments) {
-  segments_ = std::move(segments);
-  codepoint_to_segments_.clear();
-  for (size_t i = 0; i < segments_.size(); ++i) {
-    auto& s = segments_[i];
+  for (auto& s : segments) {
     if (s.Definition().codepoints.intersects(init_font_segment_.codepoints)) {
       s.Definition().codepoints.subtract(init_font_segment_.codepoints);
     }
-    AddToIndex(i, s.Definition().codepoints);
   }
-  segments_disjoint_ = CheckSegmentsAreDisjoint(init_font_segment_, segments_);
+  segments_->Reset(std::move(segments));
+  codepoint_to_segments_.clear();
+  for (size_t i = 0; i < segments_->size(); ++i) {
+    AddToIndex(i, (*segments_)[i].Definition().codepoints);
+  }
+  segments_disjoint_ = CheckSegmentsAreDisjoint(init_font_segment_, *segments_);
 }
 
 Status RequestedSegmentationInformation::ReassignInitSubset(
@@ -108,13 +111,13 @@ Status RequestedSegmentationInformation::ReassignInitSubset(
   // Changing the init font subset may have caused additional codepoints to be
   // moved to the init font. We need to update the segment definitions to
   // remove these.
-  for (size_t i = 0; i < segments_.size(); ++i) {
-    auto& s = segments_[i];
+  for (size_t i = 0; i < segments_->size(); ++i) {
+    const auto& s = (*segments_)[i];
     if (s.Definition().codepoints.intersects(init_font_segment_.codepoints)) {
       CodepointSet intersection = s.Definition().codepoints;
       intersection.intersect(init_font_segment_.codepoints);
       RemoveFromIndex(i, intersection);
-      s.Definition().codepoints.subtract(init_font_segment_.codepoints);
+      segments_->SubtractCodepoints(i, init_font_segment_.codepoints);
     }
   }
   return absl::OkStatus();

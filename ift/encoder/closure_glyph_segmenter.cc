@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@
 #include "ift/encoder/merge_strategy.h"
 #include "ift/encoder/merger.h"
 #include "ift/encoder/segment.h"
+#include "ift/encoder/segment_list.h"
 #include "ift/encoder/segmentation_context.h"
 #include "ift/encoder/subset_definition.h"
 #include "ift/encoder/types.h"
@@ -215,22 +217,14 @@ static size_t ClassifySegments(
 static StatusOr<std::vector<ProbabilityBound>> ComputeSegmentProbabilities(
     const std::vector<SubsetDefinition>& subset_definitions,
     const btree_map<SegmentSet, MergeStrategy>& merge_groups,
-    const btree_map<SegmentSet, SegmentSet>& with_shared
-  ) {
+    const btree_map<SegmentSet, SegmentSet>& with_shared) {
   std::vector<ProbabilityBound> out(subset_definitions.size(),
                                     ProbabilityBound::Zero());
-
-  std::vector<Segment> segment_list;
-  for (const auto& def : subset_definitions) {
-    segment_list.emplace_back(def);
-  }
 
   for (const auto& [merge_group_segments, strategy] : merge_groups) {
     if (!strategy.UseCosts()) {
       continue;
     }
-
-    TRYV(strategy.ResetSegmentProbabilities(segment_list.size()));
 
     const auto& profiles = strategy.ProbabilityProfiles();
     if (profiles.empty()) {
@@ -246,8 +240,8 @@ static StatusOr<std::vector<ProbabilityBound>> ComputeSegmentProbabilities(
       double min = 0.0;
       double max = 0.0;
       for (const auto& profile : profiles) {
-        ProbabilityBound p =
-            TRY(profile.Calculator())->ComputeProbability(segment_list, s);
+        ProbabilityBound p = TRY(profile.Calculator())
+                                 ->ComputeProbability(subset_definitions[s]);
         min += p.Min();
         max += p.Max();
       }
@@ -450,7 +444,6 @@ static StatusOr<std::vector<Segment>> ToOrderedSegments(
   std::vector<Segment> segment_defs =
       PreGroupSegments(merge_groups, ordering, subset_definitions,
                        pregroup_segments, segment_index_map);
-  size_t num_segments = segment_defs.size();
   if (pregroup_segments) {
     VLOG(0) << "Segments pregrouped, " << segment_defs.size() << " remain:";
   }
@@ -484,9 +477,6 @@ static StatusOr<std::vector<Segment>> ToOrderedSegments(
     VLOG(0) << "  Merge group " << name << " has " << remapped.size()
             << " segments and " << unique_codepoints.size() << " codepoints.";
     group_index++;
-
-    // Reset segment caches since segments may have been re-ordered by the sort.
-    TRYV(strategy.ResetSegmentProbabilities(num_segments));
 
     if (!new_merge_groups.insert(std::make_pair(remapped, std::move(strategy)))
              .second) {
@@ -595,10 +585,15 @@ static void LogMergeForDisjointConditions(
   }
 }
 
+using BoundCalculatorList =
+    std::vector<std::unique_ptr<ift::freq::SegmentProbabilityCalculator>>;
+
 static StatusOr<bool> ShouldMergeForDisjointConditions(
-    const SegmentationContext& context, const ActivationCondition& condition,
-    const SegmentSet& to_merge, double probability_threshold,
-    const btree_map<SegmentSet, MergeStrategy>& merge_groups) {
+    const ActivationCondition& condition, const SegmentSet& to_merge,
+    double probability_threshold,
+    const btree_map<SegmentSet, MergeStrategy>& merge_groups,
+    const flat_hash_map<const MergeStrategy*, BoundCalculatorList>&
+        strategy_calculators) {
   if (to_merge.size() <= 1) {
     return false;
   }
@@ -618,19 +613,17 @@ static StatusOr<bool> ShouldMergeForDisjointConditions(
     return false;
   }
 
-  if (!matching_strategy->UseCosts() ||
-      matching_strategy->ProbabilityProfiles().empty()) {
+  auto calc_it = strategy_calculators.find(matching_strategy);
+  if (calc_it == strategy_calculators.end() || calc_it->second.empty()) {
     LogMergeForDisjointConditions(to_merge);
     return true;
   }
 
   double total_prob = 0.0;
-  for (const auto& profile : matching_strategy->ProbabilityProfiles()) {
-    total_prob += TRY(condition.Probability(
-        context.SegmentationInfo().Segments(), *TRY(profile.Calculator())));
+  for (const auto& calculator : calc_it->second) {
+    total_prob += TRY(condition.Probability(*calculator));
   }
-  double avg_prob =
-      total_prob / (double)matching_strategy->ProbabilityProfiles().size();
+  double avg_prob = total_prob / (double)calc_it->second.size();
   if (probability_threshold <= 0.0 || avg_prob > probability_threshold) {
     LogMergeForDisjointConditions(to_merge, avg_prob);
     return true;
@@ -641,13 +634,21 @@ static StatusOr<bool> ShouldMergeForDisjointConditions(
 static StatusOr<GlyphPartition> PartitionInteractingSegments(
     const SegmentationContext& context, double probability_threshold,
     const btree_map<SegmentSet, MergeStrategy>& merge_groups) {
-  size_t num_segments = context.SegmentationInfo().Segments().size();
+  auto segment_list = context.SegmentationInfo().SharedSegments();
+  flat_hash_map<const MergeStrategy*, BoundCalculatorList> strategy_calculators;
   for (const auto& [_, strategy] : merge_groups) {
-    if (strategy.UseCosts()) {
-      TRYV(strategy.ResetSegmentProbabilities(num_segments));
+    if (!strategy.UseCosts()) {
+      continue;
+    }
+    auto& calcs = strategy_calculators[&strategy];
+    calcs.reserve(strategy.ProbabilityProfiles().size());
+    for (const auto& profile : strategy.ProbabilityProfiles()) {
+      calcs.push_back(TRY(ProbabilityCalculator::BindToSegments(
+          TRY(profile.Calculator()), segment_list)));
     }
   }
 
+  size_t num_segments = segment_list->size();
   size_t skipped_conditions = 0;
   GlyphSet skipped_glyphs;
   GlyphPartition segment_partition(num_segments);
@@ -665,7 +666,8 @@ static StatusOr<GlyphPartition> PartitionInteractingSegments(
     }
 
     if (!TRY(ShouldMergeForDisjointConditions(
-            context, condition, segments, probability_threshold, merge_groups))) {
+            condition, segments, probability_threshold, merge_groups,
+            strategy_calculators))) {
       skipped_conditions++;
       skipped_glyphs.union_set(glyphs);
       continue;
@@ -784,7 +786,7 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
           target_mode_, /*include_empty_glyphs=*/has_init_font_merge));
 
   if (target_mode_ == ift::config::UNICODE_RANGE) {
-    std::vector<const ProbabilityCalculator*> calculators;
+    std::vector<std::shared_ptr<const ProbabilityCalculator>> calculators;
     for (const auto& [_, strategy] : merge_groups) {
       if (!strategy.UseCosts()) {
         continue;
@@ -902,7 +904,8 @@ StatusOr<GlyphSegmentation> ClosureGlyphSegmenter::CodepointToGlyphSegments(
 
 StatusOr<std::vector<SegmentationCost>> ClosureGlyphSegmenter::TotalCosts(
     hb_face_t* original_face, const GlyphSegmentation& segmentation,
-    Span<const ProbabilityCalculator* const> probability_calculators) const {
+    Span<const std::shared_ptr<const ProbabilityCalculator>>
+        probability_calculators) const {
   SubsetDefinition non_ift;
   non_ift.Union(segmentation.InitialFontSegment());
 
@@ -947,8 +950,11 @@ StatusOr<std::vector<SegmentationCost>> ClosureGlyphSegmenter::TotalCosts(
   }
 
   CodepointSet covered_codepoints;
-  for (const ProbabilityCalculator* probability_calculator :
-       probability_calculators) {
+  for (const auto& probability_calculator : probability_calculators) {
+    if (!probability_calculator) {
+      return absl::InvalidArgumentError(
+          "probability_calculators must not contain null entries.");
+    }
     covered_codepoints.union_set(probability_calculator->CoveredCodepoints());
   }
 
@@ -970,15 +976,11 @@ StatusOr<std::vector<SegmentationCost>> ClosureGlyphSegmenter::TotalCosts(
     uncovered_patch_cost += patch_size + kDefaultNetworkCost;
   }
 
+  auto segments = SegmentList::FromDefinitions(segmentation.Segments());
   std::vector<SegmentationCost> out;
-  for (const ProbabilityCalculator* probability_calculator :
-       probability_calculators) {
-    std::vector<Segment> segments;
-    for (const auto& def : segmentation.Segments()) {
-      Segment s(def);
-      segments.push_back(std::move(s));
-    }
-    probability_calculator->ResetSegmentProbabilities(segments.size());
+  for (const auto& probability_calculator : probability_calculators) {
+    auto segment_calculator = TRY(ProbabilityCalculator::BindToSegments(
+        probability_calculator, segments));
 
     // TODO(garretrieger): for the total cost we need to also add in the table
     // keyed patch costs
@@ -988,7 +990,7 @@ StatusOr<std::vector<SegmentationCost>> ClosureGlyphSegmenter::TotalCosts(
     double total_cost = 0;
 
     for (const auto& c : segmentation.Conditions()) {
-      double Pc = TRY(c.Probability(segments, *probability_calculator));
+      double Pc = TRY(c.Probability(*segment_calculator));
       const GlyphSet& gids = segmentation.GidSegments().at(c.activated());
       double patch_size = (double)TRY(patch_sizer->GetPatchSize(gids));
       total_cost += Pc * (patch_size + kDefaultNetworkCost);
@@ -1085,7 +1087,7 @@ static StatusOr<std::vector<SubsetDefinition>> TableKeyedSegmentsFromFreqData(
       continue;
     }
     for (const auto& profile : strategy.ProbabilityProfiles()) {
-      const ProbabilityCalculator* calculator = TRY(profile.Calculator());
+      auto calculator = TRY(profile.Calculator());
       CodepointSet covered = calculator->CoveredCodepoints();
       covered.intersect(all_segment_codepoints);
       uncovered_codepoints.subtract(covered);

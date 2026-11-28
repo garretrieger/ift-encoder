@@ -1,53 +1,151 @@
 #include "ift/freq/segment_probability_cache.h"
 
+#include <memory>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
 #include "gtest/gtest.h"
 #include "ift/common/int_set.h"
+#include "ift/encoder/segment.h"
+#include "ift/encoder/segment_list.h"
 #include "ift/freq/probability_bound.h"
 
+using ift::common::CodepointSet;
 using ift::common::SegmentSet;
+using ift::encoder::Segment;
+using ift::encoder::SegmentList;
 using ift::freq::ProbabilityBound;
 using ift::freq::SegmentProbabilityCache;
 
 namespace {
 
-TEST(SegmentProbabilityCacheTest, ClearAndAccess) {
-  SegmentProbabilityCache cache;
-  cache.Reset(3);
-
-  EXPECT_FALSE(cache[0].has_value());
-  EXPECT_FALSE(cache[1].has_value());
-  EXPECT_FALSE(cache[2].has_value());
-
-  cache[1] = ProbabilityBound(0.25, 0.75);
-  ASSERT_TRUE(cache[1].has_value());
-  EXPECT_DOUBLE_EQ(cache[1]->Min(), 0.25);
-  EXPECT_DOUBLE_EQ(cache[1]->Max(), 0.75);
-
-  // Reset clears entries and resizes
-  cache.Reset(2);
-  EXPECT_FALSE(cache[0].has_value());
-  EXPECT_FALSE(cache[1].has_value());
-  EXPECT_THROW(cache[2], std::out_of_range);
+TEST(SegmentProbabilityCacheTest, CreateRejectsNullSegments) {
+  auto cache = SegmentProbabilityCache<ProbabilityBound>::Create(nullptr);
+  EXPECT_TRUE(absl::IsInvalidArgument(cache.status()));
 }
 
-TEST(SegmentProbabilityCacheTest, Invalidate) {
-  SegmentProbabilityCache cache;
-  cache.Reset(4);
+TEST(SegmentProbabilityCacheTest, HitsAndAutomaticMutationInvalidation) {
+  auto segments = SegmentList::Create(
+      {Segment{{'a'}}, Segment{{'b'}}, Segment{{'c'}}, Segment{{'d', 'e'}}});
+  auto cache_or = SegmentProbabilityCache<ProbabilityBound>::Create(segments);
+  ASSERT_TRUE(cache_or.ok()) << cache_or.status();
+  auto cache = std::move(*cache_or);
 
-  cache[0] = ProbabilityBound(0.1, 0.1);
-  cache[1] = ProbabilityBound(0.2, 0.2);
-  cache[2] = ProbabilityBound(0.3, 0.3);
-  cache[3] = ProbabilityBound(0.4, 0.4);
+  int compute_calls = 0;
+  auto compute = [&](const Segment& seg) {
+    compute_calls++;
+    double p = static_cast<double>(*seg.Definition().codepoints.min()) / 100.0;
+    return ProbabilityBound(p, p);
+  };
 
-  SegmentSet to_invalidate = {1, 3};
-  cache.Invalidate(to_invalidate);
+  // Initial miss then hit for segment 0 and 1.
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 0.97);
+  EXPECT_EQ(compute_calls, 1);
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 0.97);
+  EXPECT_EQ(compute_calls, 1);
 
-  EXPECT_TRUE(cache[0].has_value());
-  EXPECT_FALSE(cache[1].has_value());
-  EXPECT_TRUE(cache[2].has_value());
-  EXPECT_FALSE(cache[3].has_value());
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(1, compute).Min(), 0.98);
+  EXPECT_EQ(compute_calls, 2);
 
-  EXPECT_THROW(cache.Invalidate({10}), std::out_of_range);
+  // Set invalidates only the mutated segment.
+  segments->Set(0, Segment{{'z'}});
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 1.22);
+  EXPECT_EQ(compute_calls, 3);
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(1, compute).Min(), 0.98);
+  EXPECT_EQ(compute_calls, 3);
+
+  // AssignMerged invalidates base and to_merge, leaving untouched segments hot.
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(2, compute).Min(), 0.99);
+  EXPECT_EQ(compute_calls, 4);
+  segments->AssignMerged(1, SegmentSet{3}, Segment{{'x'}});
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(1, compute).Min(), 1.20);
+  EXPECT_EQ(compute_calls, 5);
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(2, compute).Min(), 0.99);
+  EXPECT_EQ(compute_calls, 5);
+
+  // SubtractCodepoints invalidates only when intersecting.
+  segments->Set(3, Segment{{'d', 'e'}});
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(3, compute).Min(), 1.00);
+  EXPECT_EQ(compute_calls, 6);
+
+  segments->SubtractCodepoints(3, CodepointSet{'q'});
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(3, compute).Min(), 1.00);
+  EXPECT_EQ(compute_calls, 6);
+
+  segments->SubtractCodepoints(3, CodepointSet{'d'});
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(3, compute).Min(), 1.01);
+  EXPECT_EQ(compute_calls, 7);
+
+  // Clear invalidates only the cleared segment.
+  segments->Set(0, Segment{{'a'}});
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 0.97);
+  EXPECT_EQ(compute_calls, 8);
+  segments->Clear(0);
+  int empty_calls = 0;
+  auto compute_or_empty = [&](const Segment& seg) {
+    empty_calls++;
+    return seg.Definition().Empty() ? ProbabilityBound(1.0, 1.0)
+                                    : ProbabilityBound(0.0, 0.0);
+  };
+  EXPECT_EQ(cache.GetOrCompute(0, compute_or_empty),
+            ProbabilityBound(1.0, 1.0));
+  EXPECT_EQ(empty_calls, 1);
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(2, compute).Min(), 0.99);
+  EXPECT_EQ(compute_calls, 8);
+}
+
+TEST(SegmentProbabilityCacheTest, ResetAndOutOfBounds) {
+  auto segments =
+      SegmentList::Create({Segment{{'a'}}, Segment{{'b'}}, Segment{{'c'}}});
+  auto cache_or = SegmentProbabilityCache<ProbabilityBound>::Create(segments);
+  ASSERT_TRUE(cache_or.ok()) << cache_or.status();
+  auto cache = std::move(*cache_or);
+
+  int compute_calls = 0;
+  auto compute = [&](const Segment& seg) {
+    compute_calls++;
+    double p = static_cast<double>(*seg.Definition().codepoints.min());
+    return ProbabilityBound(p, p);
+  };
+
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 'a');
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(2, compute).Min(), 'c');
+  EXPECT_EQ(compute_calls, 2);
+
+  EXPECT_THROW(cache.GetOrCompute(3, compute), std::out_of_range);
+
+  // Shrink via Reset: old entries are invalidated and out-of-bounds throws.
+  segments->Reset({Segment{{'x'}}});
+  EXPECT_THROW(cache.GetOrCompute(1, compute), std::out_of_range);
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 'x');
+  EXPECT_EQ(compute_calls, 3);
+
+  // Grow back via Reset: previously populated slot 2 must not return stale 'c'.
+  segments->Reset({Segment{{'m'}}, Segment{{'n'}}, Segment{{'o'}}});
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 'm');
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(1, compute).Min(), 'n');
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(2, compute).Min(), 'o');
+  EXPECT_EQ(compute_calls, 6);
+}
+
+TEST(SegmentProbabilityCacheTest, KeepsSegmentListAliveAfterCallerDropsRef) {
+  auto segments = SegmentList::Create({Segment{{'a'}}, Segment{{'b'}}});
+  auto cache = *SegmentProbabilityCache<ProbabilityBound>::Create(segments);
+  segments.reset();
+
+  int compute_calls = 0;
+  auto compute = [&](const Segment& seg) {
+    compute_calls++;
+    double p = static_cast<double>(*seg.Definition().codepoints.min());
+    return ProbabilityBound(p, p);
+  };
+
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 'a');
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(0, compute).Min(), 'a');
+  EXPECT_DOUBLE_EQ(cache.GetOrCompute(1, compute).Min(), 'b');
+  EXPECT_EQ(compute_calls, 2);
 }
 
 }  // namespace

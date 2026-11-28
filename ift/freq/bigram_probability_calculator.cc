@@ -1,40 +1,88 @@
 #include "ift/freq/bigram_probability_calculator.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include "absl/container/btree_set.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/status/statusor.h"
+#include "hb.h"
 #include "ift/common/int_set.h"
+#include "ift/common/try.h"
 #include "ift/encoder/segment.h"
+#include "ift/encoder/segment_list.h"
 #include "ift/encoder/subset_definition.h"
+#include "ift/encoder/types.h"
 #include "ift/freq/probability_bound.h"
+#include "ift/freq/probability_calculator.h"
+#include "ift/freq/segment_probability_cache.h"
 
 using absl::btree_set;
 using absl::InlinedVector;
+using absl::StatusOr;
 using ift::common::CodepointSet;
 using ift::common::SegmentSet;
 using ift::encoder::Segment;
 using ift::encoder::segment_index_t;
+using ift::encoder::SegmentList;
 using ift::encoder::SubsetDefinition;
 
 namespace ift::freq {
+
+class BigramSegmentProbabilityCalculator final
+    : public SegmentProbabilityCalculator {
+ public:
+  BigramSegmentProbabilityCalculator(
+      std::shared_ptr<const BigramProbabilityCalculator> calculator,
+      SegmentProbabilityCache<
+          BigramProbabilityCalculator::BigramSegmentCacheEntry>
+          segment_cache)
+      : calculator_(std::move(calculator)),
+        segment_cache_(std::move(segment_cache)) {}
+
+  ProbabilityBound ComputeProbability(
+      segment_index_t segment_index) const override {
+    return GetOrComputeSegmentEntry(segment_index).bound;
+  }
+
+  ProbabilityBound ComputeMergedProbability(
+      const SegmentSet& segment_indices) const override;
+
+  ProbabilityBound ComputeConjunctiveProbability(
+      const std::vector<ProbabilityBound>& bounds) const override {
+    return calculator_->ComputeConjunctiveProbability(bounds);
+  }
+
+ private:
+  using BigramSegmentCacheEntry =
+      BigramProbabilityCalculator::BigramSegmentCacheEntry;
+
+  const BigramSegmentCacheEntry& GetOrComputeSegmentEntry(
+      segment_index_t segment_index) const {
+    return segment_cache_.GetOrCompute(
+        segment_index, [this](const Segment& segment) {
+          return calculator_->ComputeSegmentEntry(segment.Definition());
+        });
+  }
+
+  std::shared_ptr<const BigramProbabilityCalculator> calculator_;
+  mutable SegmentProbabilityCache<BigramSegmentCacheEntry> segment_cache_;
+};
 
 BigramProbabilityCalculator::BigramProbabilityCalculator(
     UnicodeFrequencies frequencies, size_t max_cache_size)
     : frequencies_(std::move(frequencies)),
       cache_("bigram probability", max_cache_size) {}
 
-static ProbabilityBound KouniasBound(
-  double unigram_total,
-  double bigram_total,
-  double max_partial_bigram_total,
-  double max_single_bound,
-  double max_pair_bound
-) {
+static ProbabilityBound KouniasBound(double unigram_total, double bigram_total,
+                                     double max_partial_bigram_total,
+                                     double max_single_bound,
+                                     double max_pair_bound) {
   // The bounds calculations are based on the Kounias bounds:
   // https://projecteuclid.org/journals/annals-of-mathematical-statistics/volume-39/issue-6/Bounds-for-the-Probability-of-a-Union-with-Applications/10.1214/aoms/1177698049.full
 
@@ -43,14 +91,12 @@ static ProbabilityBound KouniasBound(
   // - max(Pi + Pj - Pij)
   // - Or: sum(Pi) - sum(Pj<k)
   double lower = std::max(
-      std::max(unigram_total - bigram_total,
-               max_pair_bound), max_single_bound);
+      std::max(unigram_total - bigram_total, max_pair_bound), max_single_bound);
 
   // An upper bound is given by
   // sum(Pi) - max_j=1..n [ sum_j!=k(Pjk) ]
-  double upper = std::max(
-      std::min(unigram_total - max_partial_bigram_total, 1.0),
-      lower);
+  double upper =
+      std::max(std::min(unigram_total - max_partial_bigram_total, 1.0), lower);
   return ProbabilityBound(lower, upper);
 }
 
@@ -78,10 +124,8 @@ ProbabilityBound BigramProbabilityCalculator::ApplyFeatureTags(
 }
 
 ProbabilityBound BigramProbabilityCalculator::ApplyLowerBoundAndFeatureTags(
-    const absl::btree_set<hb_tag_t>& feature_tags,
-    double best_lower,
+    const absl::btree_set<hb_tag_t>& feature_tags, double best_lower,
     ProbabilityBound codepoints_bound) const {
-
   double final_lower = std::max(codepoints_bound.Min(), best_lower);
   double final_upper = std::max(codepoints_bound.Max(), final_lower);
   codepoints_bound = ProbabilityBound(final_lower, final_upper);
@@ -98,6 +142,8 @@ BigramProbabilityCalculator::ComputeSegmentEntry(
     entry.saturated = true;
     return entry;
   }
+
+  entry.has_feature_tags = !definition.feature_tags.empty();
 
   unsigned n = definition.codepoints.size();
   entry.cps.reserve(n);
@@ -145,9 +191,9 @@ BigramProbabilityCalculator::ComputeSegmentEntry(
         max_partial_bigram_total =
             std::max(partial_total, max_partial_bigram_total);
       }
-      entry.codepoints_bound = KouniasBound(entry.unigram_total,
-        entry.bigram_total, max_partial_bigram_total,
-        entry.max_single_bound, entry.max_pair_bound);
+      entry.codepoints_bound = KouniasBound(
+          entry.unigram_total, entry.bigram_total, max_partial_bigram_total,
+          entry.max_single_bound, entry.max_pair_bound);
     }
   }
 
@@ -155,31 +201,33 @@ BigramProbabilityCalculator::ComputeSegmentEntry(
   return entry;
 }
 
-const BigramProbabilityCalculator::BigramSegmentCacheEntry&
-BigramProbabilityCalculator::GetOrComputeSegmentEntry(
-    absl::Span<const Segment> segments, segment_index_t segment_index) const {
-  std::optional<BigramSegmentCacheEntry>& cached_seg =
-      segment_cache_[segment_index];
-  if (!cached_seg.has_value()) {
-    cached_seg = ComputeSegmentEntry(segments.at(segment_index).Definition());
-  }
-  return *cached_seg;
-}
-
 ProbabilityBound BigramProbabilityCalculator::ComputeProbability(
-    absl::Span<const ift::encoder::Segment> segments,
-    segment_index_t segment_index) const {
-  return GetOrComputeSegmentEntry(segments, segment_index).bound;
+    const SubsetDefinition& definition) const {
+  if (definition.Empty()) {
+    return ProbabilityBound(1.0, 1.0);
+  }
+  if (definition.codepoints.empty()) {
+    return ApplyFeatureTags(definition.feature_tags,
+                            ProbabilityBound(0.0, 0.0));
+  }
+  if (definition.codepoints.size() == 1) {
+    double p = frequencies_.ProbabilityFor(*definition.codepoints.min());
+    if (p >= 1.0) {
+      return ApplyFeatureTags(definition.feature_tags,
+                              ProbabilityBound(1.0, 1.0));
+    }
+    return ApplyFeatureTags(definition.feature_tags, ProbabilityBound(p, p));
+  }
+  return ComputeSegmentEntry(definition).bound;
 }
 
-ProbabilityBound BigramProbabilityCalculator::ComputeMergedProbability(
-    absl::Span<const Segment> segments,
+ProbabilityBound BigramSegmentProbabilityCalculator::ComputeMergedProbability(
     const SegmentSet& segment_indices) const {
   if (segment_indices.empty()) {
     return ProbabilityBound(1.0, 1.0);
   }
   if (segment_indices.size() == 1) {
-    return ComputeProbability(segments, *segment_indices.min());
+    return ComputeProbability(*segment_indices.min());
   }
 
   // Note: this assumes that segments are all disjoint, which is enforced in
@@ -189,6 +237,9 @@ ProbabilityBound BigramProbabilityCalculator::ComputeMergedProbability(
   // a probability bound. As a starting point we use the various totals
   // collected per segment in the segment_cache_. These are then augmented
   // with any missing inter segment codepoint pairs.
+
+  // Ensure segment_cache_ does not reallocate while collecting entry pointers.
+  segment_cache_.SyncSize();
 
   double best_lower = 0.0;
   double unigram_total = 0.0;
@@ -203,11 +254,10 @@ ProbabilityBound BigramProbabilityCalculator::ComputeMergedProbability(
   entries.reserve(segment_indices.size());
 
   for (segment_index_t s : segment_indices) {
-    const BigramSegmentCacheEntry& entry =
-        GetOrComputeSegmentEntry(segments, s);
+    const BigramSegmentCacheEntry& entry = GetOrComputeSegmentEntry(s);
 
-    // Note: entry is stable since the entry cache is only invalidated/resized
-    // via InvalidateSegmentProbabilities() or ResetSegmentProbabilities(...)
+    // Note: entry pointer is stable for this call because SyncSize() was called
+    // upfront and SegmentList does not change during ComputeMergedProbability.
     entries.push_back(&entry);
     best_lower = std::max(best_lower, entry.codepoints_bound.Min());
     if (best_lower >= 1.0 || entry.saturated) {
@@ -215,8 +265,7 @@ ProbabilityBound BigramProbabilityCalculator::ComputeMergedProbability(
       return ProbabilityBound(1.0, 1.0);
     }
 
-    const auto& segment = segments.at(s);
-    if (!segment.Definition().feature_tags.empty()) {
+    if (entry.has_feature_tags) {
       has_feature_tags = true;
     }
 
@@ -234,14 +283,16 @@ ProbabilityBound BigramProbabilityCalculator::ComputeMergedProbability(
   btree_set<hb_tag_t> feature_tags;
   if (has_feature_tags) {
     for (segment_index_t s : segment_indices) {
-      const auto& seg_tags = segments.at(s).Definition().feature_tags;
+      const auto& seg_tags =
+          segment_cache_.Segments().at(s).Definition().feature_tags;
       feature_tags.insert(seg_tags.begin(), seg_tags.end());
     }
   }
 
-  auto& cache_entry = cache_[all_codepoints];
+  auto& cache_entry = calculator_->cache_[all_codepoints];
   if (cache_entry.has_value()) {
-    return ApplyLowerBoundAndFeatureTags(feature_tags, best_lower, *cache_entry);
+    return calculator_->ApplyLowerBoundAndFeatureTags(feature_tags, best_lower,
+                                                      *cache_entry);
   }
 
   InlinedVector<double, 256> partial_totals;
@@ -289,8 +340,8 @@ ProbabilityBound BigramProbabilityCalculator::ComputeMergedProbability(
         double partial_i_delta = 0.0;
         for (size_t j = 0; j < n_inner; j++) {
           double p_j = inner.unigram_probs[j];
-          double Pij =
-              frequencies_.ProbabilityFor(cp_i, inner.cps[j], p_i, p_j);
+          double Pij = calculator_->frequencies_.ProbabilityFor(
+              cp_i, inner.cps[j], p_i, p_j);
           bigram_total += Pij;
           partial_i_delta += Pij;
           partials_inner[j] += Pij;
@@ -312,10 +363,12 @@ ProbabilityBound BigramProbabilityCalculator::ComputeMergedProbability(
         std::max(partial_total, max_partial_bigram_total);
   }
 
-  cache_entry = KouniasBound(unigram_total, bigram_total,
-    max_partial_bigram_total, max_single_bound, max_pair_bound);
+  cache_entry =
+      KouniasBound(unigram_total, bigram_total, max_partial_bigram_total,
+                   max_single_bound, max_pair_bound);
 
-  return ApplyLowerBoundAndFeatureTags(feature_tags, best_lower, *cache_entry);
+  return calculator_->ApplyLowerBoundAndFeatureTags(feature_tags, best_lower,
+                                                    *cache_entry);
 }
 
 ProbabilityBound BigramProbabilityCalculator::ComputeConjunctiveProbability(
@@ -337,6 +390,18 @@ ProbabilityBound BigramProbabilityCalculator::ComputeConjunctiveProbability(
   }
   double min_prob = sum - (double)bounds.size() + 1.0;
   return ProbabilityBound(std::max(0.0, min_prob), min_of_maxes);
+}
+
+StatusOr<std::unique_ptr<SegmentProbabilityCalculator>>
+BigramProbabilityCalculator::BindToSegmentsImpl(
+    std::shared_ptr<const ProbabilityCalculator> self,
+    std::shared_ptr<const SegmentList> segments) const {
+  auto cache = TRY(SegmentProbabilityCache<BigramSegmentCacheEntry>::Create(
+      std::move(segments)));
+  return std::make_unique<BigramSegmentProbabilityCalculator>(
+      std::static_pointer_cast<const BigramProbabilityCalculator>(
+          std::move(self)),
+      std::move(cache));
 }
 
 }  // namespace ift::freq

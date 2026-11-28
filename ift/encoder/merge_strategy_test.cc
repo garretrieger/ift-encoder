@@ -51,9 +51,9 @@ TEST(MergeStrategyTest, UnigramProfile) {
 
   auto profile = ProbabilityProfile::Unigram(std::move(frequencies));
   ASSERT_TRUE(profile.ok()) << profile.status();
-  EXPECT_NE(
-      dynamic_cast<const UnigramProbabilityCalculator*>(*profile->Calculator()),
-      nullptr);
+  EXPECT_NE(dynamic_cast<const UnigramProbabilityCalculator*>(
+                profile->Calculator()->get()),
+            nullptr);
   EXPECT_EQ(profile->init_font_merge_threshold, std::nullopt);
   EXPECT_EQ(profile->init_font_merge_probability_threshold, std::nullopt);
 }
@@ -66,9 +66,9 @@ TEST(MergeStrategyTest, BigramProfile) {
 
   auto profile = ProbabilityProfile::Bigram(std::move(frequencies));
   ASSERT_TRUE(profile.ok()) << profile.status();
-  EXPECT_NE(
-      dynamic_cast<const BigramProbabilityCalculator*>(*profile->Calculator()),
-      nullptr);
+  EXPECT_NE(dynamic_cast<const BigramProbabilityCalculator*>(
+                profile->Calculator()->get()),
+            nullptr);
 }
 
 TEST(MergeStrategyTest, ProfileRequiresFrequencyData) {
@@ -90,7 +90,7 @@ TEST(MergeStrategyTest, CostBasedSingleProfile) {
   EXPECT_EQ(strategy.NetworkOverheadCost(), 75);
   EXPECT_EQ(strategy.MinimumGroupSize(), 4);
   EXPECT_EQ(strategy.ProbabilityProfiles().size(), 1);
-  EXPECT_EQ(*strategy.ProbabilityCalculator(0), calc.get());
+  EXPECT_EQ(*strategy.ProbabilityCalculator(0), calc);
   EXPECT_FALSE(strategy.HasInitFontMerge());
   EXPECT_EQ(strategy.ProbabilityProfiles()[0].init_font_merge_threshold,
             std::nullopt);
@@ -149,8 +149,8 @@ TEST(MergeStrategyTest, MultipleProfiles) {
       0.02);
 
   // Indexed accessors reference the corresponding profile.
-  EXPECT_EQ(*strategy.ProbabilityCalculator(0), calc1.get());
-  EXPECT_EQ(*strategy.ProbabilityCalculator(1), calc2.get());
+  EXPECT_EQ(*strategy.ProbabilityCalculator(0), calc1);
+  EXPECT_EQ(*strategy.ProbabilityCalculator(1), calc2);
   EXPECT_EQ((*strategy.GetProbabilityProfile(1))->init_font_merge_threshold,
             std::nullopt);
 }
