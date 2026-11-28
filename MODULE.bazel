@@ -114,11 +114,13 @@ crate.from_cargo(
 )
 use_repo(crate, "fontations_deps")
 
-# Hedron - for generating compiles_commands.json
+# Hedron - for generating compile_commands.json
+# Uses the maintained helly25 fork for Bazel 9+ compatibility
+# (upstream hedronvision/bazel-compile-commands-extractor is dormant).
 
 bazel_dep(name = "hedron_compile_commands", dev_dependency = True)
 git_override(
     module_name = "hedron_compile_commands",
-    remote = "https://github.com/hedronvision/bazel-compile-commands-extractor.git",
-    commit = "abb61a688167623088f8768cc9264798df6a9d10",
+    remote = "https://github.com/helly25/bazel-compile-commands-extractor.git",
+    commit = "394f677d00a99ef31e7a3f7a831087edc6a58e73",
 )

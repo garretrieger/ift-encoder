@@ -96,7 +96,7 @@ script:
 
 ## Generating compile_commands.json for IDE
 
-This repo is configured to use [hedron](https://github.com/hedronvision/bazel-compile-commands-extractor) to produce a
+This repo is configured to use [hedron](https://github.com/helly25/bazel-compile-commands-extractor) to produce a
 compile_commands.json file which can be provided to some IDEs to configure on the fly compilation and auto complete of
 source files:
 
